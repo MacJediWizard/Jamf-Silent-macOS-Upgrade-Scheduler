@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.4.9] – 2025-04-29
+### Added
+- Enhanced logging system with log rotation
+- Additional logging levels (TRACE, VERBOSE, SYSTEM, AUDIT)
+- System information logging at startup
+- Automatic log file management and rotation
+- Expanded logging contexts for better debugging
+
+### Changed
+- Improved log format consistency
+- Enhanced log file permissions handling
+- Added size-based log rotation with configurable limits
+
+---
+
 ## [1.4.8] – 2025-04-29
 ### Added
 - Enhanced dropdown menu UI with proper SwiftDialog select interface

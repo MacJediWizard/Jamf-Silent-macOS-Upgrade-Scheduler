@@ -31,6 +31,7 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.4.9 - Enhanced logging system with rotation and additional log levels
 # v1.4.8 - Enhanced UI with proper dropdown selections and improved response handling
 # v1.4.7 - Fixed JSON parsing to correctly extract dropdown selections from nested SwiftDialog output
 # v1.4.6 - Switched to dropdown UI with three options (Install Now, Schedule Today, Defer 24 Hours)
@@ -44,12 +45,11 @@
 
 # ---------------- Configuration ----------------
 
-WRAPPER_LOG="/var/log/erase-install-wrapper.log"
 PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
 SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
 DIALOG_BIN="/usr/local/bin/dialog"
 
-SCRIPT_VERSION="1.4.8"            # ← Bump this on every release!
+SCRIPT_VERSION="1.4.9"            # ← Bump this on every release!
 INSTALLER_OS="15"                 # macOS Version e.g. 14=Sonoma, 15=Sequoia
 MAX_DEFERS=3                       # Max allowed 24-hour deferrals per script version
 FORCE_TIMEOUT_SECONDS=259200       # 72 hours total window
@@ -60,6 +60,59 @@ DEBUG_MODE=true                    # Enable debug logging
 
 LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"
 LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"
+
+# ---------------- Logging System ----------------
+
+# Log file configuration
+WRAPPER_LOG="/var/log/erase-install-wrapper.log"
+MAX_LOG_SIZE_MB=10
+MAX_LOG_FILES=5
+
+# Initialize logging system
+init_logging() {
+    # Create log directory if it doesn't exist
+    log_dir=$(dirname "${WRAPPER_LOG}")
+    [[ -d "${log_dir}" ]] || mkdir -p "${log_dir}"
+
+    # Rotate logs if needed
+    if [[ -f "${WRAPPER_LOG}" ]]; then
+        current_size=$(du -m "${WRAPPER_LOG}" | cut -f1)
+        if [[ ${current_size} -gt ${MAX_LOG_SIZE_MB} ]]; then
+            # Rotate existing logs
+            for i in $(seq $((MAX_LOG_FILES-1)) -1 1); do
+                [[ -f "${WRAPPER_LOG}.${i}" ]] && mv "${WRAPPER_LOG}.${i}" "${WRAPPER_LOG}.$((i+1))"
+            done
+            mv "${WRAPPER_LOG}" "${WRAPPER_LOG}.1"
+            touch "${WRAPPER_LOG}"
+            echo "[INFO]    [$(date +'%Y-%m-%d %H:%M:%S')] Log file rotated due to size (${current_size}MB)" | tee -a "${WRAPPER_LOG}"
+        fi
+    fi
+
+    # Ensure log file exists and has correct permissions
+    touch "${WRAPPER_LOG}"
+    chmod 644 "${WRAPPER_LOG}"
+}
+
+# Enhanced logging functions
+log_info()    { echo "[INFO]    [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
+log_warn()    { echo "[WARN]    [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
+log_error()   { echo "[ERROR]   [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}" >&2; }
+log_debug()   { [[ "${DEBUG_MODE}" = true ]] && echo "[DEBUG]   [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
+log_trace()   { [[ "${DEBUG_MODE}" = true ]] && echo "[TRACE]   [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
+log_verbose() { [[ "${DEBUG_MODE}" = true ]] && echo "[VERBOSE] [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
+log_system()  { echo "[SYSTEM]  [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
+log_audit()   { echo "[AUDIT]   [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
+
+# System information logging
+log_system_info() {
+    log_system "Script Version: ${SCRIPT_VERSION}"
+    log_system "macOS Version: $(sw_vers -productVersion)"
+    log_system "Hardware Model: $(sysctl -n hw.model)"
+    log_system "Available Disk Space: $(df -h / | awk 'NR==2 {print $4}')"
+    log_system "Current User: $(whoami)"
+    log_system "Dialog Version: $("${DIALOG_BIN}" --version 2>/dev/null || echo 'Not installed')"
+    log_system "Erase-Install Version: $(grep -o 'v[0-9.]*' "${SCRIPT_PATH}" 2>/dev/null || echo 'Not installed')"
+}
 
 # ---------------- Dialog Text Configuration ----------------
 
@@ -82,11 +135,6 @@ DIALOG_ICON="SF=gear"
 DIALOG_POSITION="topright"
 
 # ---------------- Helper Functions ----------------
-
-log_info()  { echo "[INFO]  [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
-log_warn()  { echo "[WARN]  [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
-log_error() { echo "[ERROR] [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}" >&2; }
-log_debug(){ [ "${DEBUG_MODE}" = true ] && echo "[DEBUG] [$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "${WRAPPER_LOG}"; }
 
 # ---------------- Dependency Installers ----------------
 
@@ -356,4 +404,11 @@ EOF
 
 # ---------------- Main Execution ----------------
 
-log_info "Starting erase-install wrapper."; dependency_check; init_plist; get_deferral_state; set_options; show_prompt
+init_logging
+log_info "Starting erase-install wrapper script v${SCRIPT_VERSION}"
+log_system_info
+dependency_check
+init_plist
+get_deferral_state
+set_options
+show_prompt
