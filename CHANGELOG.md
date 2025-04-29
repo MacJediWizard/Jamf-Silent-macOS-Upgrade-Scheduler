@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.4] – 2025-04-29
+### Changed
+- Updated logging functions to use simplified `date +'%Y-%m-%d %H:%M:%S'` syntax.
+
+---
+
 ## [1.4.3] – 2025-04-29
 ### Changed
 - Switched to a dropdown UI with a single “OK” button for all three actions (Install Now, Schedule Today, Defer 24 Hours).
