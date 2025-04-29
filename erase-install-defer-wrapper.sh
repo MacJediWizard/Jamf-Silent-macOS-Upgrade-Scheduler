@@ -19,6 +19,7 @@
 # - Supports scheduling install later today
 # - Fully supports erase-install's --test-run for dry-run testing
 # - Automatically installs missing dependencies if enabled
+# - Configurable dialog text, buttons, and window positioning
 #
 # Requirements:
 # - macOS 11+
@@ -33,7 +34,8 @@
 # v1.0.0 - Initial working version
 # v1.0.1 - Added header, license, and test-run integration
 # v1.1.0 - Hardened for enterprise, dependency checks, smarter LaunchDaemon handling, cleaner logging
-# v1.2.0 - Added auto-install for erase-install and swiftDialog dependencies
+# v1.2.0 - Added auto-install of dependencies, improved JSON parsing with jq fallback, safe sudo execution, structured INFO/WARN/ERROR/DEBUG logging
+# v1.3.0 - Added Dialog window positioning, moved Dialog text/buttons to top-configurable variables for easier customization
 #
 #########################################################################################################################################################################
 
@@ -49,51 +51,76 @@ MAX_DEFERS=3                     # Max allowed 24-hour deferrals
 DEFER_TIMEOUT_SECONDS=86400      # 24 hours
 FORCE_TIMEOUT_SECONDS=259200     # 72 hours
 
-TEST_MODE=false                   # Set true for dry-run without real install
+TEST_MODE=true                   # Set true for dry-run without real install
 AUTO_INSTALL_DEPENDENCIES=true    # Set to true to auto-install missing dependencies
+DEBUG_MODE=false                 # Set true for debug logging
 
 LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"
 LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"
 
+# ---------------- Dialog Text Configuration ----------------
+
+DIALOG_TITLE="macOS Upgrade Required"
+DIALOG_MESSAGE="Please install macOS $INSTALLER_OS. You may install now or schedule a convenient time today."
+DIALOG_INSTALL_NOW_TEXT="Install Now"
+DIALOG_SCHEDULE_TODAY_TEXT="Schedule Today"
+DIALOG_DEFER_TEXT="Defer 24 Hours"
+DIALOG_ICON="SF=gear"
+DIALOG_POSITION="topright"
+
 # ---------------- Helper Functions ----------------
 
-log() {
-    echo "[$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$WRAPPER_LOG"
+log_info() {
+    echo "[INFO] [$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$WRAPPER_LOG"
+}
+
+log_warn() {
+    echo "[WARN] [$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$WRAPPER_LOG"
+}
+
+log_error() {
+    echo "[ERROR] [$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$WRAPPER_LOG" >&2
+}
+
+log_debug() {
+    if [ "$DEBUG_MODE" = true ]; then
+        echo "[DEBUG] [$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$WRAPPER_LOG"
+    fi
 }
 
 install_erase_install() {
-    log "erase-install not found. Attempting to download and install..."
+    log_info "erase-install not found. Attempting to download and install..."
     local tempDir
     tempDir=$(mktemp -d)
-    curl -Ls -o "$tempDir/erase-install.pkg" "https://github.com/grahampugh/erase-install/releases/latest/download/erase-install.pkg"
+    curl -fsSL -o "$tempDir/erase-install.pkg" "https://github.com/grahampugh/erase-install/releases/latest/download/erase-install.pkg"
     if [ $? -ne 0 ]; then
-        log "ERROR: Failed to download erase-install package."
+        log_error "Failed to download erase-install package."
         exit 1
     fi
     /usr/sbin/installer -pkg "$tempDir/erase-install.pkg" -target /
     if [ $? -eq 0 ]; then
-        log "Successfully installed erase-install."
+        log_info "Successfully installed erase-install."
     else
-        log "ERROR: Failed to install erase-install package."
+        log_error "Failed to install erase-install package."
         exit 1
     fi
     rm -rf "$tempDir"
 }
 
 install_swiftDialog() {
-    log "swiftDialog not found. Attempting to download and install..."
+    log_info "swiftDialog not found. Attempting to download and install..."
     local tempDir
     tempDir=$(mktemp -d)
-    curl -Ls -o "$tempDir/dialog.pkg" "https://github.com/bartreardon/swiftDialog/releases/latest/download/dialog.pkg"
+    curl -fsSL -o "$tempDir/dialog.pkg" "https://github.com/bartreardon/swiftDialog/releases/latest/download/dialog.pkg"
     if [ $? -ne 0 ]; then
-        log "ERROR: Failed to download swiftDialog package."
+        log_error "Failed to download swiftDialog package."
         exit 1
     fi
     /usr/sbin/installer -pkg "$tempDir/dialog.pkg" -target /
     if [ $? -eq 0 ]; then
-        log "Successfully installed swiftDialog."
+        log_info "Successfully installed swiftDialog."
     else
-        log "ERROR: Failed to install swiftDialog package."
+        log_error "Failed to install swiftDialog package."
         exit 1
     fi
     rm -rf "$tempDir"
@@ -104,7 +131,7 @@ dependency_check() {
         if [ "$AUTO_INSTALL_DEPENDENCIES" = true ]; then
             install_erase_install
         else
-            log "ERROR: erase-install not found at $SCRIPT_PATH. Exiting."
+            log_error "erase-install not found at $SCRIPT_PATH. Exiting."
             exit 1
         fi
     fi
@@ -112,7 +139,7 @@ dependency_check() {
         if [ "$AUTO_INSTALL_DEPENDENCIES" = true ]; then
             install_swiftDialog
         else
-            log "ERROR: swiftDialog not found at $DIALOG_BIN. Exiting."
+            log_error "swiftDialog not found at $DIALOG_BIN. Exiting."
             exit 1
         fi
     fi
@@ -144,13 +171,13 @@ remove_existing_launchdaemon() {
     if [ -f "$LAUNCHDAEMON_PATH" ]; then
         launchctl unload "$LAUNCHDAEMON_PATH" 2>/dev/null
         rm -f "$LAUNCHDAEMON_PATH"
-        log "Existing LaunchDaemon removed."
+        log_warn "Existing LaunchDaemon removed."
     fi
 }
 
 schedule_launchdaemon() {
-    launchTime="$1"
-    IFS=":" read hour minute <<< "$launchTime"
+    local launchTime="$1"
+    IFS=":" read -r hour minute <<< "$launchTime"
 
     remove_existing_launchdaemon
 
@@ -188,51 +215,63 @@ EOF
     chmod 644 "$LAUNCHDAEMON_PATH"
     chown root:wheel "$LAUNCHDAEMON_PATH"
     launchctl load "$LAUNCHDAEMON_PATH"
-    log "LaunchDaemon scheduled for $launchTime"
+    log_info "LaunchDaemon scheduled for $launchTime"
 }
 
 show_prompt() {
-    log "Displaying swiftDialog prompt."
+    log_info "Displaying swiftDialog prompt."
 
     if [ "$DEFERRAL_EXCEEDED" = true ]; then
-        buttonList="--button1text 'Install Now' --button2text 'Schedule Today'"
+        buttonList="--button1text \"$DIALOG_INSTALL_NOW_TEXT\" --button2text \"$DIALOG_SCHEDULE_TODAY_TEXT\""
     else
-        buttonList="--button1text 'Install Now' --button2text 'Schedule Today' --button3text 'Defer 24 Hours'"
+        buttonList="--button1text \"$DIALOG_INSTALL_NOW_TEXT\" --button2text \"$DIALOG_SCHEDULE_TODAY_TEXT\" --button3text \"$DIALOG_DEFER_TEXT\""
     fi
 
-    choice=$("$DIALOG_BIN" \
-        --title "macOS Upgrade Required" \
-        --message "Please install macOS $INSTALLER_OS. You may install now or schedule a convenient time today." \
-        $buttonList --height 160 --width 500 --moveable --icon "SF=gear" --ontop --mini \
-        --timeout 0 --showicon true)
+    response=$("$DIALOG_BIN" \
+        --title "$DIALOG_TITLE" \
+        --message "$DIALOG_MESSAGE" \
+        $buttonList --height 160 --width 500 --moveable --icon "$DIALOG_ICON" --ontop --mini \
+        --timeout 0 --showicon true --json --position "$DIALOG_POSITION")
 
-    if echo "$choice" | grep -q "button1"; then
-        log "User selected: Install Now."
-        if [ "$TEST_MODE" = true ]; then
-            "$SCRIPT_PATH" --reinstall --os=$INSTALLER_OS --no-fs --check-power --min-drive-space=50 --cleanup-after-use --test-run
-        else
-            "$SCRIPT_PATH" --reinstall --os=$INSTALLER_OS --no-fs --check-power --min-drive-space=50 --cleanup-after-use
-        fi
+    if [[ -z "$response" ]]; then
+        log_warn "No response from swiftDialog (user closed dialog or error)."
+        exit 1
+    fi
+
+    if [ -x "/usr/bin/jq" ]; then
+        buttonClicked=$(echo "$response" | /usr/bin/jq -r '.buttonReturned')
+    else
+        buttonClicked=$(echo "$response" | /usr/bin/sed -n 's/.*\"buttonReturned\"[ ]*:[ ]*\"\\([^\"]*\\)\".*/\\1/p')
+    fi
+
+    log_info "User clicked button: $buttonClicked"
+
+    if [[ "$buttonClicked" == "$DIALOG_INSTALL_NOW_TEXT" ]]; then
+        log_info "User selected: Install Now."
+        /usr/bin/sudo "$SCRIPT_PATH" --reinstall --os="$INSTALLER_OS" --no-fs --check-power --min-drive-space=50 --cleanup-after-use $( [ "$TEST_MODE" = true ] && echo "--test-run" )
         exit 0
     fi
 
-    if echo "$choice" | grep -q "button2"; then
+    if [[ "$buttonClicked" == "$DIALOG_SCHEDULE_TODAY_TEXT" ]]; then
         selectedTime=$("$DIALOG_BIN" \
             --title "Schedule Installation" \
             --selecttitle "Select a time today to install" \
             --selectvalues "17:00,18:00,19:00,20:00,21:00" \
-            --icon "SF=calendar" --height 140 --width 400 --moveable --ontop)
+            --icon "SF=calendar" --height 140 --width 400 --moveable --ontop --json --position "$DIALOG_POSITION")
 
-        if [ "$TEST_MODE" = true ]; then
-            log "[TEST MODE] Would schedule install for $selectedTime"
+        if [ -x "/usr/bin/jq" ]; then
+            scheduledChoice=$(echo "$selectedTime" | /usr/bin/jq -r '.selectedValue')
         else
-            schedule_launchdaemon "$selectedTime"
+            scheduledChoice=$(echo "$selectedTime" | /usr/bin/sed -n 's/.*\"selectedValue\"[ ]*:[ ]*\"\\([^\"]*\\)\".*/\\1/p')
         fi
+
+        log_info "User selected scheduled time: $scheduledChoice"
+        schedule_launchdaemon "$scheduledChoice"
         exit 0
     fi
 
-    if echo "$choice" | grep -q "button3"; then
-        log "User deferred 24 hours."
+    if [[ "$buttonClicked" == "$DIALOG_DEFER_TEXT" ]]; then
+        log_info "User deferred 24 hours."
         deferCount=$((deferCount + 1))
         defaults write "$PLIST" deferCount -int "$deferCount"
         if [ "$deferCount" -eq 1 ]; then
@@ -244,7 +283,7 @@ show_prompt() {
 
 # ---------------- Main Execution ----------------
 
-log "Starting erase-install wrapper."
+log_info "Starting erase-install wrapper."
 
 dependency_check
 init_plist
