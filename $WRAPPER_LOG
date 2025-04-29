@@ -1,0 +1,2 @@
+[INFO]  [$(date +%Y-%m-%d %H:%M:%S)] $1
+[ERROR] [$(date +%Y-%m-%d %H:%M:%S)] $1

@@ -1,5 +1,33 @@
 # Changelog
 
+All notable changes to this project will be documented in this file.
+
+## [1.4.3] – 2025-04-29
+### Changed
+- Switched to a dropdown UI with a single “OK” button for all three actions (Install Now, Schedule Today, Defer 24 Hours).
+
+---
+
+## [1.4.2] – 2025-04-29
+### Added
+- Preserve the `--mini` flag for a compact window.
+- Added debug logging of SwiftDialog’s exit code and raw output to help troubleshoot empty or malformed responses.
+
+---
+
+## [1.4.1] – 2025-04-29
+### Fixed
+- Corrected syntax in the install functions (removed stray backslashes before `$(mktemp -d)` calls).
+
+---
+
+## [1.4.0] – 2025-04-29
+### Added
+- Persist `deferCount` and `firstPromptDate` in the preferences plist so deferral history carries across runs.
+- Logic to reset deferral history whenever `SCRIPT_VERSION` is bumped (detects new script release).
+
+---
+
 ## [1.3.0] - 2025-04-29
 ### Added
 - Configurable Dialog window positioning (now defaults to `topright`)
