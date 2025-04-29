@@ -1,0 +1,12 @@
+# macOS System Files
+**.DS_Store
+
+# Log Files
+*.log
+
+# Plist Caches
+*.plist
+
+# Other temp
+tmp/
+temp/
