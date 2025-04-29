@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+
+## [1.4.8] – 2025-04-29
+### Added
+- Enhanced dropdown menu UI with proper SwiftDialog select interface
+- Added automatic deferral reset after successful install or scheduling
+- Implemented 24-hour re-prompt scheduling for deferrals
+- Dynamic dropdown options based on available deferrals
+
+### Changed
+- Improved selection handling and validation
+- Better JSON output parsing from SwiftDialog
+- Updated LaunchDaemon handling for deferrals and scheduling
+- Improved scheduling dialog with dynamic time slots and tomorrow options
+
+### Fixed
+- Fixed dropdown selection parsing from SwiftDialog output
+- Corrected deferral count tracking and reset logic
+- Resolved issues with option visibility after max deferrals
+
+---
+
+## [1.4.7] – 2025-04-29
+### Fixed
+- Fixed JSON parsing to correctly extract dropdown selections from nested SwiftDialog output structure.
+
+---
+
+## [1.4.6] – 2025-04-29
+### Changed
+- Switched to dropdown UI with three options (Install Now, Schedule Today, Defer 24 Hours) via SwiftDialog.
+
+---
+
+## [1.4.5] – 2025-04-29
+### Changed
+- Reverted to multi-button UI: Install Now, Schedule Today, Defer 24 Hours.
+
+---
+
 ## [1.4.4] – 2025-04-29
 ### Changed
 - Updated logging functions to use simplified `date +'%Y-%m-%d %H:%M:%S'` syntax.
