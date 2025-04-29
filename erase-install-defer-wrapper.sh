@@ -111,7 +111,21 @@ log_system_info() {
     log_system "Available Disk Space: $(df -h / | awk 'NR==2 {print $4}')"
     log_system "Current User: $(whoami)"
     log_system "Dialog Version: $("${DIALOG_BIN}" --version 2>/dev/null || echo 'Not installed')"
-    log_system "Erase-Install Version: $(grep -o 'v[0-9.]*' "${SCRIPT_PATH}" 2>/dev/null || echo 'Not installed')"
+    if [ -f "${SCRIPT_PATH}" ]; then
+      # Grab the version number that follows your “# Version of this script” comment
+      erase_install_ver=$(grep -m1 -A1 '^# Version of this script' "${SCRIPT_PATH}" \
+      | grep -m1 -oE 'version="[^"]+"' \
+      | cut -d'"' -f2)
+      
+      # Fallback if nothing was found
+      if [ -z "${erase_install_ver}" ]; then
+        erase_install_ver="Unknown"
+      fi
+      
+      log_system "Erase-Install Version: ${erase_install_ver}"
+    else
+      log_system "Erase-Install Version: Not installed"
+    fi
 }
 
 # ---------------- Dialog Text Configuration ----------------
