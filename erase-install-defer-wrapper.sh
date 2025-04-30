@@ -78,7 +78,29 @@ DEBUG_MODE=true
 
 LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"
 LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"
-WRAPPER_PATH="${0}"
+# Determine absolute path for script regardless of how it was called
+# This ensures compatibility with Jamf and other deployment methods
+if [[ -L "${0}" ]]; then
+  # Handle symlinks
+  WRAPPER_PATH="$(readlink "${0}")"
+else
+  WRAPPER_PATH="${0}"
+fi
+
+# Convert to absolute path if not already
+if [[ ! "${WRAPPER_PATH}" = /* ]]; then
+  # Get the directory of the script and combine with basename
+  WRAPPER_DIR="$(cd "$(dirname "${WRAPPER_PATH}")" 2>/dev/null && pwd)"
+  if [[ -n "${WRAPPER_DIR}" ]]; then
+    WRAPPER_PATH="${WRAPPER_DIR}/$(basename "${WRAPPER_PATH}")"
+  else
+    # Fallback for Jamf and other deployment scenarios
+    # Most reliable location is the script parameter $0
+    WRAPPER_PATH="${0}"
+    # Log that we're using the original path
+    echo "WARNING: Could not determine absolute path, using original path: ${WRAPPER_PATH}" >> "${WRAPPER_LOG}" 2>&1
+  fi
+fi
 
 WRAPPER_LOG="/var/log/erase-install-wrapper.log"
 MAX_LOG_SIZE_MB=10
