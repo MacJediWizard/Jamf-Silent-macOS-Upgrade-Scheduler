@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.4.10] – 2025-04-30
+### Fixed
+- Resolved Bash error when parsing scheduled times like `08:00` or `09:00`:
+- Bash interpreted these as octal numbers, causing `value too great for base` errors.
+- Updated all time parsing logic to use `10#` base-10 safety in arithmetic operations.
+
+---
+
 ## [1.4.9] – 2025-04-29
 ### Added
 - Enhanced logging system with log rotation

@@ -31,6 +31,7 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.4.10 - Fixed Bash octal parsing bug when scheduling times like 08:00 or 09:00
 # v1.4.9 - Enhanced logging system with rotation and additional log levels
 # v1.4.8 - Enhanced UI with proper dropdown selections and improved response handling
 # v1.4.7 - Fixed JSON parsing to correctly extract dropdown selections from nested SwiftDialog output
@@ -57,7 +58,7 @@ FORCE_TIMEOUT_SECONDS=259200       # 72 hours total window
 
 TEST_MODE=true                     # Dry-run without real install
 AUTO_INSTALL_DEPENDENCIES=true     # Auto-install missing dependencies
-DEBUG_MODE=true                    # Enable debug logging
+DEBUG_MODE=false                    # Enable debug logging
 
 LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"
 LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"
@@ -284,7 +285,7 @@ show_prompt(){
         "${DIALOG_SCHEDULE_TODAY_TEXT}")
             # Create a list of time slots from current hour to 23:00
             current_hour=$(date +%H)
-            next_hour=$((current_hour + 1))
+            next_hour=$((10#$current_hour + 1))
             time_options=""
             
             # Ensure we offer at least 3 hours of scheduling options
