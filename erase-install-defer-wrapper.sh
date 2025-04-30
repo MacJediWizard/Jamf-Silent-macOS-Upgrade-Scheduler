@@ -301,6 +301,11 @@ remove_existing_launchdaemon() {
     while IFS= read -r daemon; do
       [ -z "${daemon}" ] && continue
       
+      # Skip if this is the same as our primary LaunchDaemon (already handled)
+      if [ "${daemon}" = "${LAUNCHDAEMON_PATH}" ]; then
+        continue
+      fi
+      
       if remove_launchdaemon "${daemon}"; then
         removal_count=$((removal_count + 1))
       else
@@ -316,10 +321,19 @@ remove_existing_launchdaemon() {
 
 create_scheduled_launchdaemon() {
   local hour="$1" minute="$2" day="$3" month="$4"
-  hour=$((10#$hour)); minute=$((10#$minute))
+  
+  # Convert hour and minute to base-10 to avoid octal interpretation
+  if [[ -n "$hour" ]]; then
+    hour=${hour#0}
+  fi
+  if [[ -n "$minute" ]]; then
+    minute=${minute#0}
+  fi
+  
+  # Ensure any existing LaunchDaemons are removed first
   remove_existing_launchdaemon
   
-  log_info "Creating LaunchDaemon for $(printf '%02d:%02d' "$hour" "$minute")${day:+ on day $day}${month:+ month $month}"
+  log_info "Creating LaunchDaemon for $(printf '%02d:%02d' $((hour)) $((minute)))${day:+ on day $day}${month:+ month $month}"
   
   # Use defaults to create a properly formatted plist file
   defaults write "${LAUNCHDAEMON_PATH}" Label "${LAUNCHDAEMON_LABEL}"
@@ -453,14 +467,18 @@ generate_time_options() {
   local time_options=""
   
   for h in $(seq "$next_hour" 23); do
-    local formatted_hour; formatted_hour=$(printf "%02d" "10#$h")
+    # Convert hour to base-10 explicitly to avoid octal interpretation
+    local h_base10=$((h))
+    local formatted_hour; formatted_hour=$(printf "%02d" "$h_base10")
     time_options="${time_options}${time_options:+,}${formatted_hour}:00,${formatted_hour}:30"
   done
   
   local count; count=$(echo "$time_options" | tr ',' '\n' | wc -l | tr -d ' ')
   if [[ "$count" -lt 3 ]]; then
     for h in $(seq 8 $((next_hour - 1))); do
-      local th; th=$(printf "%02d" "10#$h")
+      # Convert hour to base-10 explicitly to avoid octal interpretation
+      local h_base10=$((h))
+      local th; th=$(printf "%02d" "$h_base10")
       time_options="${time_options}${time_options:+,}Tomorrow ${th}:00"
     done
   fi
@@ -502,8 +520,10 @@ show_prompt() {
   
   case "$selection" in
     "${DIALOG_INSTALL_NOW_TEXT}")
+      # Ensure any existing LaunchDaemons are removed for "Install Now"
+      remove_existing_launchdaemon
       reset_deferrals
-      run_erase_install
+      show_preinstall
     ;;
     "${DIALOG_SCHEDULE_TODAY_TEXT}")
       local sched subcode time_data hour minute day month
@@ -519,18 +539,26 @@ show_prompt() {
       
       time_data=$(validate_time "$sched")
       if [[ $? -ne 0 || -z "$time_data" ]]; then
-        log_error "Invalid time selection: $sched"
+        log_warn "Invalid time selection: $sched"
         exit 1
       fi
       
+      # Parse time data
       read -r when hour minute day month <<< "$time_data"
       
+      # Convert to proper numeric values for display
+      local hour_num=${hour#0}
+      local minute_num=${minute#0}
+      
+      # Ensure existing LaunchDaemons are removed before creating a new one
+      remove_existing_launchdaemon
+      
       if [[ "$when" == "tomorrow" ]]; then
-        log_info "Scheduling for tomorrow at $(printf '%02d:%02d' "10#$hour" "10#$minute")"
-        create_scheduled_launchdaemon "$hour" "$minute" "$day" "$month"
+        log_info "Scheduling for tomorrow at $(printf '%02d:%02d' $((hour_num)) $((minute_num)))"
+        create_scheduled_launchdaemon "$hour" "$minute" "$day" "$month" "install"
       else
-        log_info "Scheduling for today at $(printf '%02d:%02d' "10#$hour" "10#$minute")"
-        create_scheduled_launchdaemon "$hour" "$minute"
+        log_info "Scheduling for today at $(printf '%02d:%02d' $((hour_num)) $((minute_num)))"
+        create_scheduled_launchdaemon "$hour" "$minute" "" "" "install"
       fi
       
       reset_deferrals
@@ -550,10 +578,18 @@ show_prompt() {
         local defer_day; defer_day=$(date -v+1d +%d)
         local defer_month; defer_month=$(date -v+1d +%m)
         
+        # Convert to base-10 to avoid octal interpretation
+        local defer_hour_num=${defer_hour#0}
+        local defer_min_num=${defer_min#0}
+        
+        # Ensure existing LaunchDaemons are removed before creating a new one
+        remove_existing_launchdaemon
+        
+        # Create the LaunchDaemon for tomorrow
         create_scheduled_launchdaemon "$defer_hour" "$defer_min" "$defer_day" "$defer_month" "prompt"
-        log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "10#$defer_hour" "10#$defer_min")"
+        log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "$defer_hour_num" "$defer_min_num")"
       fi
-    ;;
+      ;;
     *)
       log_warn "Unexpected selection: $selection"
       exit 1
@@ -570,6 +606,8 @@ if [[ "$1" == "--scheduled" ]]; then
   log_info "Running in scheduled mode"
   log_system_info
   dependency_check
+  # Ensure any existing LaunchDaemons are removed before running erase-install
+  remove_existing_launchdaemon
   # Show pre-install countdown window before running erase-install
   show_preinstall
   exit 0
@@ -583,3 +621,5 @@ init_plist
 get_deferral_state
 set_options
 show_prompt
+
+exit 0
