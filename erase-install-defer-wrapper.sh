@@ -251,49 +251,33 @@ create_scheduled_launchdaemon() {
   
   log_info "Creating LaunchDaemon for $(printf '%02d:%02d' "$hour" "$minute")${day:+ on day $day}${month:+ month $month}"
   
-  cat > "${LAUNCHDAEMON_PATH}" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${LAUNCHDAEMON_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-EOF
+  # Use defaults to create a properly formatted plist file
+  defaults write "${LAUNCHDAEMON_PATH}" Label "${LAUNCHDAEMON_LABEL}"
   
-  if [[ "$5" == "prompt" ]]; then
-    echo "    <string>/bin/bash</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>${WRAPPER_PATH}</string>" >> "${LAUNCHDAEMON_PATH}"
-  else
-    echo "    <string>/bin/bash</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>${WRAPPER_PATH}</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>--scheduled</string>" >> "${LAUNCHDAEMON_PATH}"
+  # Set up program arguments array
+  local args=()
+  args+=("/bin/bash" "${WRAPPER_PATH}")
+  # Add --scheduled parameter only for non-prompt mode
+  if [[ "$5" != "prompt" ]]; then
+    args+=("--scheduled")
   fi
+  defaults write "${LAUNCHDAEMON_PATH}" ProgramArguments -array "${args[@]}"
   
-  cat >> "${LAUNCHDAEMON_PATH}" << EOF
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>${hour}</integer>
-    <key>Minute</key><integer>${minute}</integer>
-EOF
+  # Set up calendar interval
+  defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval -dict Hour ${hour} Minute ${minute}
+  [[ -n "$day" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval.Day -int ${day}
+  [[ -n "$month" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval.Month -int ${month}
   
-  [[ -n "$day" ]] && echo "    <key>Day</key><integer>$day</integer>" >> "${LAUNCHDAEMON_PATH}"
-  [[ -n "$month" ]] && echo "    <key>Month</key><integer>$month</integer>" >> "${LAUNCHDAEMON_PATH}"
+  # Set RunAtLoad to false
+  defaults write "${LAUNCHDAEMON_PATH}" RunAtLoad -bool false
   
-  cat >> "${LAUNCHDAEMON_PATH}" << EOF
-  </dict>
-  <key>RunAtLoad</key><false/>
-</dict>
-</plist>
-EOF
-  
+  # Set proper permissions
   chmod 644 "${LAUNCHDAEMON_PATH}"
   chown root:wheel "${LAUNCHDAEMON_PATH}"
   
-  launchctl load "${LAUNCHDAEMON_PATH}" || { log_error "Failed to load LaunchDaemon"; return 1; }
-  log_info "LaunchDaemon loaded successfully"
+  # Use bootstrap instead of load for better compatibility
+  launchctl bootstrap system "${LAUNCHDAEMON_PATH}" 2>/dev/null || { log_error "Failed to bootstrap LaunchDaemon"; return 1; }
+  log_info "LaunchDaemon created and loaded successfully"
 }
 
 # ---------------- Installer ----------------
