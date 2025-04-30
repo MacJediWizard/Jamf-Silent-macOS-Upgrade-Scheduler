@@ -3,6 +3,33 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.4.12] - 2025-04-30
+### Fixed
+- SwiftDialog `SelectedOption` parsing reliability when multiline or non-jq JSON
+- Logging of times now consistently zero-padded (`13:00` instead of `13:0`)
+- `create_scheduled_launchdaemon` now safely unloads active LaunchDaemons using `bootout`
+- Deferral expiration now properly routes to `show_preinstall` instead of direct install
+- Improved fallback for missing SwiftDialog selection fields
+
+### Improved
+- LaunchDaemon creation logging now includes padded timestamps
+- Safer handling of deferral logic edge cases near 72h timeout window
+
+---
+
+## [1.4.11] - 2025-04-28
+### Fixed
+- LaunchDaemon consistency: ensured proper recreation and loading when scheduling times
+- Improved error handling during LaunchDaemon creation
+- Resolved edge case where LaunchDaemon was not recreated if a malformed time was selected
+
+### Improved
+- Logging system enhanced with rotation based on log size (10MB max, 5 backups)
+- Timestamps and log messages standardized across all log levels
+- Added debug-level tracing of SwiftDialog raw output and exit codes
+
+---
+
 ## [1.4.10] – 2025-04-30
 ### Fixed
 - Resolved Bash error when parsing scheduled times like `08:00` or `09:00`:
