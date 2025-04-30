@@ -31,6 +31,9 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.4.16 - Fixed printf error with leading zeros by enforcing base-10 interpretation
+# v1.4.15 - Removed --mini flag and adjusted window dimensions for proper display of UI elements
+# v1.4.14 - Added --mini flag to all SwiftDialog commands, implemented proper countdown with auto-continue
 # v1.4.13 - Fixed scheduled installation countdown window, ensured wrapper script is called properly
 # v1.4.12 - Fixed SwiftDialog selection parsing, padded log times, enforced LaunchDaemon unload, deferred flow fix
 # v1.4.11 - Fixed LaunchDaemon creation consistency and improved error handling
@@ -47,19 +50,6 @@
 # v1.4.0 - Persistent deferral count across runs and reset when new script version is detected
 #
 #########################################################################################################################################################################
-#!/bin/bash
-
-#########################################################################################################################################################################
-#
-# MacJediWizard Consulting, Inc.
-# Copyright (c) 2025 MacJediWizard Consulting, Inc.
-# All rights reserved.
-# Created by: William Grzybowski
-#
-# Project: Jamf Silent macOS Upgrade Scheduler
-# Script: erase-install-defer-wrapper.sh
-#
-#########################################################################################################################################################################
 
 # ---------------- Configuration ----------------
 
@@ -67,7 +57,7 @@ PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
 SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
 DIALOG_BIN="/usr/local/bin/dialog"
 
-SCRIPT_VERSION="1.4.13"
+SCRIPT_VERSION="1.4.16"
 INSTALLER_OS="15"
 MAX_DEFERS=3
 FORCE_TIMEOUT_SECONDS=259200
@@ -295,9 +285,70 @@ run_erase_install() {
 show_preinstall() {
   local countdown=${PREINSTALL_COUNTDOWN:-60}
   log_info "Showing pre-install countdown ($countdown seconds)..."
-  local response; response=$("$DIALOG_BIN" --title "$PREINSTALL_TITLE" --message "$PREINSTALL_MESSAGE" --button1text "$PREINSTALL_CONTINUE_TEXT" --height 140 --width 380 --moveable --icon "$DIALOG_ICON" --ontop --timeout "$countdown" --json --position "$DIALOG_POSITION")
-  local btn; btn=$(parse_dialog_output "$response" "buttonReturned")
-  log_info "Pre-install dialog returned: [$btn] (or timed out)"
+  
+  # Create a temporary file to track countdown progress
+  local tmp_progress
+  tmp_progress=$(mktemp)
+  echo "$countdown" > "$tmp_progress"
+  
+  # Launch dialog with countdown and progress bar
+  "$DIALOG_BIN" --title "$PREINSTALL_TITLE" \
+    --message "$PREINSTALL_MESSAGE" \
+    --button1text "$PREINSTALL_CONTINUE_TEXT" \
+    --height 180 \
+    --width 450 \
+    --moveable \
+    --icon "$DIALOG_ICON" \
+    --ontop \
+    --progress "$countdown" \
+    --progresstext "Starting in $countdown seconds..." \
+    --position "$DIALOG_POSITION" \
+    --jsonoutput > /tmp/dialog_output.json &
+  
+  local dialog_pid=$!
+  local countdown_remaining=$countdown
+  
+  # Update countdown progress
+  while [[ $countdown_remaining -gt 0 ]]; do
+    # Check if the dialog is still running
+    if ! kill -0 $dialog_pid 2>/dev/null; then
+      # Dialog was closed/button pressed - continue immediately
+      log_info "Pre-install dialog closed by user, continuing immediately"
+      break
+    fi
+    
+    # Decrement countdown
+    ((countdown_remaining--))
+    echo "$countdown_remaining" > "$tmp_progress"
+    
+    # Update dialog progress
+    "$DIALOG_BIN" --progresstext "Starting in $countdown_remaining seconds..." --progress "$countdown_remaining"
+    
+    # Wait 1 second
+    sleep 1
+  done
+  
+  # Kill dialog if still running
+  if kill -0 $dialog_pid 2>/dev/null; then
+    kill $dialog_pid 2>/dev/null
+  fi
+  
+  # Cleanup temp file
+  rm -f "$tmp_progress"
+  
+  # Parse any response if the dialog completed normally
+  if [[ -f /tmp/dialog_output.json ]]; then
+    local response
+    response=$(cat /tmp/dialog_output.json)
+    local btn
+    btn=$(parse_dialog_output "$response" "buttonReturned")
+    log_info "Pre-install dialog returned: [$btn] (or timed out)"
+    rm -f /tmp/dialog_output.json
+  else
+    log_info "Pre-install dialog completed countdown, continuing automatically"
+  fi
+  
+  # Run the installation
   run_erase_install
 }
 
@@ -325,14 +376,14 @@ generate_time_options() {
   local time_options=""
   
   for h in $(seq "$next_hour" 23); do
-    local formatted_hour; formatted_hour=$(printf "%02d" "$h")
+    local formatted_hour; formatted_hour=$(printf "%02d" "10#$h")
     time_options="${time_options}${time_options:+,}${formatted_hour}:00,${formatted_hour}:30"
   done
   
   local count; count=$(echo "$time_options" | tr ',' '\n' | wc -l | tr -d ' ')
   if [[ "$count" -lt 3 ]]; then
     for h in $(seq 8 $((next_hour - 1))); do
-      local th; th=$(printf "%02d" "$h")
+      local th; th=$(printf "%02d" "10#$h")
       time_options="${time_options}${time_options:+,}Tomorrow ${th}:00"
     done
   fi
@@ -361,7 +412,7 @@ validate_time() {
 
 show_prompt() {
   log_info "Displaying SwiftDialog dropdown prompt."
-  local raw; raw=$("${DIALOG_BIN}" --title "${DIALOG_TITLE}" --message "${DIALOG_MESSAGE}" --button1text "Confirm" --height 200 --width 500 --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "size=14" --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+  local raw; raw=$("${DIALOG_BIN}" --title "${DIALOG_TITLE}" --message "${DIALOG_MESSAGE}" --button1text "Confirm" --height 250 --width 550 --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "size=14" --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
   local code=$?
   log_debug "SwiftDialog exit code: ${code}"
   log_debug "SwiftDialog raw output: ${raw}"
@@ -380,7 +431,7 @@ show_prompt() {
     "${DIALOG_SCHEDULE_TODAY_TEXT}")
       local sched subcode time_data hour minute day month
       local time_options; time_options=$(generate_time_options)
-      local sub; sub=$("${DIALOG_BIN}" --title "Schedule Installation" --message "Select installation time:" --button1text "Confirm" --height 230 --width 450 --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "size=14" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+      local sub; sub=$("${DIALOG_BIN}" --title "Schedule Installation" --message "Select installation time:" --button1text "Confirm" --height 280 --width 500 --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "size=14" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
       subcode=$?
       log_debug "Schedule dialog exit code: ${subcode}"
       log_debug "Schedule raw output: ${sub}"
@@ -398,10 +449,10 @@ show_prompt() {
       read -r when hour minute day month <<< "$time_data"
       
       if [[ "$when" == "tomorrow" ]]; then
-        log_info "Scheduling for tomorrow at $(printf '%02d:%02d' "$hour" "$minute")"
+        log_info "Scheduling for tomorrow at $(printf '%02d:%02d' "10#$hour" "10#$minute")"
         create_scheduled_launchdaemon "$hour" "$minute" "$day" "$month"
       else
-        log_info "Scheduling for today at $(printf '%02d:%02d' "$hour" "$minute")"
+        log_info "Scheduling for today at $(printf '%02d:%02d' "10#$hour" "10#$minute")"
         create_scheduled_launchdaemon "$hour" "$minute"
       fi
       
@@ -423,7 +474,7 @@ show_prompt() {
         local defer_month; defer_month=$(date -v+1d +%m)
         
         create_scheduled_launchdaemon "$defer_hour" "$defer_min" "$defer_day" "$defer_month" "prompt"
-        log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "$defer_hour" "$defer_min")"
+        log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "10#$defer_hour" "10#$defer_min")"
       fi
     ;;
     *)

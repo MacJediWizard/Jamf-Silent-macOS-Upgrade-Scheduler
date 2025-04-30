@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.4.16] - 2025-04-30
+### Fixed
+- Fixed printf errors when formatting times with leading zeros (like 08:00, 09:30)
+- Added explicit base-10 interpretation to prevent octal parsing errors
+
+---
+
+## [1.4.15] - 2025-04-30
+### Changed
+- Removed --mini flag from all SwiftDialog commands to fix window display issues
+- Increased window dimensions for better display of UI elements:
+  - Main dialog: 250×550 (was 200×500)
+  - Scheduling dialog: 280×500 (was 230×450)
+  - Countdown window: 180×450 (was 140×380)
+
+### Fixed
+- Fixed issues with dropdown lists being cut off or partially visible
+- Improved overall user experience with properly sized dialog windows
+
+---
+
+## [1.4.14] - 2025-04-30
+### Added
+- Implemented automatic continue functionality when countdown reaches zero
+- Added --mini flag to all SwiftDialog commands for consistent window sizing
+
+### Fixed
+- Enhanced secondary schedule window with proper countdown timer
+- Improved countdown display with continuous updates and progress bar
+- Better user experience with clear countdown progress indication
+
+---
+
 ## [1.4.13] - 2025-04-30
 ### Fixed
 - Fixed scheduled installation countdown window not appearing when installation was scheduled for later
