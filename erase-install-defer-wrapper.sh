@@ -41,6 +41,7 @@
 # v1.4.2 - Preserved --mini UI and added debug logging of SwiftDialog exit codes/output
 # v1.4.1 - Fixed syntax in install functions ($(mktemp -d))
 # v1.4.0 - Persistent deferral count across runs and reset when new script version is detected
+#
 #########################################################################################################################################################################
 
 # ---------------- Configuration ----------------
