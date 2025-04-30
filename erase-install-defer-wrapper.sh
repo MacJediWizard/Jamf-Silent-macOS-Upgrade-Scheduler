@@ -31,6 +31,7 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.4.13 - Fixed scheduled installation countdown window, ensured wrapper script is called properly
 # v1.4.12 - Fixed SwiftDialog selection parsing, padded log times, enforced LaunchDaemon unload, deferred flow fix
 # v1.4.11 - Fixed LaunchDaemon creation consistency and improved error handling
 # v1.4.10 - Fixed Bash octal parsing bug when scheduling times like 08:00 or 09:00
@@ -66,7 +67,7 @@ PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
 SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
 DIALOG_BIN="/usr/local/bin/dialog"
 
-SCRIPT_VERSION="1.4.12"
+SCRIPT_VERSION="1.4.13"
 INSTALLER_OS="15"
 MAX_DEFERS=3
 FORCE_TIMEOUT_SECONDS=259200
@@ -243,14 +244,9 @@ EOF
     echo "    <string>/bin/bash</string>" >> "${LAUNCHDAEMON_PATH}"
     echo "    <string>${WRAPPER_PATH}</string>" >> "${LAUNCHDAEMON_PATH}"
   else
-    echo "    <string>${SCRIPT_PATH}</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>--reinstall</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>--os=${INSTALLER_OS}</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>--no-fs</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>--check-power</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>--min-drive-space=50</string>" >> "${LAUNCHDAEMON_PATH}"
-    echo "    <string>--cleanup-after-use</string>" >> "${LAUNCHDAEMON_PATH}"
-    [[ "${TEST_MODE}" = true ]] && echo "    <string>--test-run</string>" >> "${LAUNCHDAEMON_PATH}"
+    echo "    <string>/bin/bash</string>" >> "${LAUNCHDAEMON_PATH}"
+    echo "    <string>${WRAPPER_PATH}</string>" >> "${LAUNCHDAEMON_PATH}"
+    echo "    <string>--scheduled</string>" >> "${LAUNCHDAEMON_PATH}"
   fi
   
   cat >> "${LAUNCHDAEMON_PATH}" << EOF
@@ -440,6 +436,7 @@ if [[ "$1" == "--scheduled" ]]; then
   log_info "Running in scheduled mode"
   log_system_info
   dependency_check
+  # Show pre-install countdown window before running erase-install
   show_preinstall
   exit 0
 fi

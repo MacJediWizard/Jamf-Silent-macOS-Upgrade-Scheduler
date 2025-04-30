@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.4.13] - 2025-04-30
+### Fixed
+- Fixed scheduled installation countdown window not appearing when installation was scheduled for later
+- Modified LaunchDaemon creation to ensure wrapper script is called with proper parameters
+- Ensured consistent user experience between immediate and scheduled installations
+
+---
+
 ## [1.4.12] - 2025-04-30
 ### Fixed
 - SwiftDialog `SelectedOption` parsing reliability when multiline or non-jq JSON
