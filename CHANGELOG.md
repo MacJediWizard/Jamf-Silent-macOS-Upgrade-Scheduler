@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.4.17] - 2025-04-30
+### Added
+- Implemented centralized LaunchDaemon control mechanism
+
+### Improved
+- Enhanced LaunchDaemon cleanup to find and remove all instances
+- Added logging for LaunchDaemon discovery and removal
+- Added error handling for failed removals
+
+### Fixed
+- Fixed time formatting in printf commands to prevent "invalid number" errors
+- Improved handling of time values with leading zeros
+
+---
+
 ## [1.4.16] - 2025-04-30
 ### Fixed
 - Fixed printf errors when formatting times with leading zeros (like 08:00, 09:30)

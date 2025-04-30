@@ -31,6 +31,7 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.4.17 - Implemented centralized LaunchDaemon control mechanism and fixed time formatting issues
 # v1.4.16 - Fixed printf error with leading zeros by enforcing base-10 interpretation
 # v1.4.15 - Removed --mini flag and adjusted window dimensions for proper display of UI elements
 # v1.4.14 - Added --mini flag to all SwiftDialog commands, implemented proper countdown with auto-continue
@@ -57,7 +58,7 @@ PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
 SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
 DIALOG_BIN="/usr/local/bin/dialog"
 
-SCRIPT_VERSION="1.4.16"
+SCRIPT_VERSION="1.4.17"
 INSTALLER_OS="15"
 MAX_DEFERS=3
 FORCE_TIMEOUT_SECONDS=259200
@@ -226,11 +227,90 @@ get_deferral_state() {
 
 # ---------------- LaunchDaemon ----------------
 
+# Function to list all existing LaunchDaemons related to this script
+list_existing_launchdaemons() {
+  log_info "Searching for existing LaunchDaemons..."
+  # Find all LaunchDaemons that contain our label (full or partial matches)
+  local base_label=$(echo "${LAUNCHDAEMON_LABEL}" | cut -d. -f1-3)
+  local found_daemons=$(launchctl list | grep "${base_label}" | awk '{print $3}')
+  
+  # Also check file system for related plist files that might not be loaded
+  local fs_daemons=$(find /Library/LaunchDaemons -name "*${base_label}*" -type f 2>/dev/null)
+  
+  # Combine and deduplicate results
+  echo "${found_daemons}"$'\n'"${fs_daemons}" | grep -v "^$" | sort | uniq
+}
+
+# Function to safely remove a single LaunchDaemon
+remove_launchdaemon() {
+  local daemon_path="$1"
+  local daemon_label=""
+  
+  # Extract label from plist if it's a file path
+  if [[ "${daemon_path}" == *".plist" ]]; then
+    daemon_label=$(defaults read "${daemon_path}" Label 2>/dev/null)
+    log_info "Processing LaunchDaemon: ${daemon_path} (Label: ${daemon_label:-unknown})"
+  else
+    # If we were passed a label directly
+    daemon_label="${daemon_path}"
+    daemon_path="/Library/LaunchDaemons/${daemon_label}.plist"
+    log_info "Processing LaunchDaemon with label: ${daemon_label}"
+  fi
+  
+  # Attempt to unload/bootout the daemon
+  if launchctl list | grep -q "${daemon_label}"; then
+    log_info "Unloading active LaunchDaemon: ${daemon_label}"
+    if ! launchctl bootout system "${daemon_path}" 2>/dev/null; then
+      log_warn "Failed to bootout LaunchDaemon via path, trying by label..."
+      if ! launchctl bootout system/${daemon_label} 2>/dev/null; then
+        log_error "Failed to unload LaunchDaemon: ${daemon_label}"
+        return 1
+      fi
+    fi
+  fi
+  
+  # Remove the file if it exists
+  if [ -f "${daemon_path}" ]; then
+    log_info "Removing LaunchDaemon file: ${daemon_path}"
+    if ! rm -f "${daemon_path}"; then
+      log_error "Failed to remove LaunchDaemon file: ${daemon_path}"
+      return 1
+    fi
+  fi
+  
+  log_info "LaunchDaemon ${daemon_label:-unknown} successfully removed."
+  return 0
+}
+
+# Enhanced function to remove all existing LaunchDaemons related to this script
 remove_existing_launchdaemon() {
+  log_info "Checking for existing LaunchDaemons to remove..."
+  
+  # First, try to remove the primary LaunchDaemon
   if [ -f "${LAUNCHDAEMON_PATH}" ]; then
-    launchctl list | grep -q "${LAUNCHDAEMON_LABEL}" && launchctl bootout system "${LAUNCHDAEMON_PATH}" 2>/dev/null
-    rm -f "${LAUNCHDAEMON_PATH}"
-    log_info "Existing LaunchDaemon removed."
+    remove_launchdaemon "${LAUNCHDAEMON_PATH}"
+  fi
+  
+  # Now find and remove any other related LaunchDaemons
+  local daemons=$(list_existing_launchdaemons)
+  local removal_count=0
+  local failure_count=0
+  
+  if [ -n "${daemons}" ]; then
+    log_info "Found additional LaunchDaemons to clean up."
+    while IFS= read -r daemon; do
+      [ -z "${daemon}" ] && continue
+      
+      if remove_launchdaemon "${daemon}"; then
+        removal_count=$((removal_count + 1))
+      else
+        failure_count=$((failure_count + 1))
+      fi
+    done <<< "${daemons}"
+    
+    log_info "LaunchDaemon cleanup complete. Removed: ${removal_count}, Failed: ${failure_count}"
+  else
+    log_info "No additional LaunchDaemons found."
   fi
 }
 
@@ -336,12 +416,9 @@ show_preinstall() {
   # Cleanup temp file
   rm -f "$tmp_progress"
   
-  # Parse any response if the dialog completed normally
-  if [[ -f /tmp/dialog_output.json ]]; then
-    local response
-    response=$(cat /tmp/dialog_output.json)
-    local btn
-    btn=$(parse_dialog_output "$response" "buttonReturned")
+  # Check if dialog was closed by user action
+  if [ -f /tmp/dialog_output.json ]; then
+    local btn=$(cat /tmp/dialog_output.json | grep "button" | cut -d':' -f2 | tr -d '" ,')
     log_info "Pre-install dialog returned: [$btn] (or timed out)"
     rm -f /tmp/dialog_output.json
   else
