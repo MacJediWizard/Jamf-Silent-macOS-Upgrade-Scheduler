@@ -373,30 +373,41 @@ create_scheduled_launchdaemon() {
   local day_num=$([ -n "$day" ] && printf '%d' "$((10#${day}))" || echo "")
   local month_num=$([ -n "$month" ] && printf '%d' "$((10#${month}))" || echo "")
   
+  # Get console user for user-level agent
+  local console_user=""
+  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  
+  # Use user-level agent instead of system daemon
+  local user_agent_dir="/Users/$console_user/Library/LaunchAgents"
+  local user_agent_label="$LAUNCHDAEMON_LABEL"
+  local user_agent_path="$user_agent_dir/$user_agent_label.plist"
+  
   # Remove existing daemons and ensure clean state
   remove_existing_launchdaemon
   
   # Ensure the target directory exists
-  local daemon_dir="/Library/LaunchDaemons"
-  [ -d "${daemon_dir}" ] || mkdir -p "${daemon_dir}"
+  sudo -u "$console_user" mkdir -p "$user_agent_dir"
   
   # Double-check no files exist before creating new ones
-  sudo rm -f "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak" 2>/dev/null
+  sudo -u "$console_user" rm -f "$user_agent_path" 2>/dev/null
   
-  log_info "Creating LaunchDaemon for $(printf '%02d:%02d' "${hour_num}" "${minute_num}")${day:+ on day $day_num}${month:+ month $month_num}"
+  log_info "Creating LaunchAgent for user $console_user at $(printf '%02d:%02d' "${hour_num}" "${minute_num}")${day:+ on day $day_num}${month:+ month $month_num}"
   
-  # Create the plist content atomically
+  # Create the plist content for user agent
   local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
     <key>Label</key>
-    <string>${LAUNCHDAEMON_LABEL}</string>
+    <string>${user_agent_label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>${WRAPPER_PATH}</string>
         <string>--scheduled</string>
+        <string>--user-scheduled</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -413,129 +424,92 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
     <string>/var/log/erase-install-wrapper.log</string>
     <key>RunAtLoad</key>
     <false/>
-    <key>ThrottleInterval</key>
-    <integer>5</integer>
-    <key>ExitTimeOut</key>
-    <integer>300</integer>
     <key>ProcessType</key>
     <string>Interactive</string>
-    <key>Nice</key>
-    <integer>0</integer>
-    <key>LowPriorityIO</key>
-    <false/>
-    <key>AbandonProcessGroup</key>
-    <true/>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>LANG</key>
         <string>en_US.UTF-8</string>
+        <key>DISPLAY</key>
+        <string>:0</string>
     </dict>
-    <key>SoftResourceLimits</key>
-    <dict>
-        <key>NumberOfFiles</key>
-        <integer>4096</integer>
-    </dict>
-    <key>HardResourceLimits</key>
-    <dict>
-        <key>NumberOfFiles</key>
-        <integer>8192</integer>
-    </dict>
-    <key>WorkingDirectory</key>
-    <string>/tmp</string>
-    <key>SessionCreate</key>
-    <true/>
 </dict>
 </plist>"
 
-  # Write plist content atomically
-  printf "%s" "${plist_content}" | sudo tee "${LAUNCHDAEMON_PATH}" > /dev/null
+  # Write plist content as the user
+  printf "%s" "${plist_content}" | sudo -u "$console_user" tee "$user_agent_path" > /dev/null
   
-  # Set proper ownership and permissions
-  sudo chown root:wheel "${LAUNCHDAEMON_PATH}"
-  sudo chmod 644 "${LAUNCHDAEMON_PATH}"
+  # Set proper permissions
+  sudo -u "$console_user" chmod 644 "$user_agent_path"
   
   # Validate plist
-  if ! sudo plutil -lint "${LAUNCHDAEMON_PATH}"; then
-    log_error "Invalid LaunchDaemon plist"
-    sudo rm -f "${LAUNCHDAEMON_PATH}"
+  if ! plutil -lint "$user_agent_path"; then
+    log_error "Invalid LaunchAgent plist"
+    sudo -u "$console_user" rm -f "$user_agent_path"
     return 1
   fi
   
   # Display plist content for debugging
   log_debug "Generated plist content:"
-  log_debug "$(sudo plutil -p "${LAUNCHDAEMON_PATH}")"
+  log_debug "$(plutil -p "$user_agent_path")"
   
-  # Bootstrap the daemon with proper path and verification
-  log_info "Bootstrapping LaunchDaemon..."
-  if ! sudo /bin/launchctl bootstrap system "${LAUNCHDAEMON_PATH}"; then
-    log_error "Failed to bootstrap LaunchDaemon"
-    # Try loading as a fallback method
-    if ! sudo /bin/launchctl load "${LAUNCHDAEMON_PATH}"; then
-      log_error "Failed to load LaunchDaemon after bootstrap failure"
-      sudo rm -f "${LAUNCHDAEMON_PATH}"
-      return 1
-    fi
-    log_info "Successfully loaded LaunchDaemon with fallback method"
+  # Bootstrap the agent with launchctl for the user
+  log_info "Bootstrapping LaunchAgent..."
+  local console_uid
+  console_uid=$(id -u "$console_user")
+  
+  if ! sudo launchctl asuser "$console_uid" launchctl load "$user_agent_path"; then
+    log_error "Failed to bootstrap LaunchAgent"
+    sudo -u "$console_user" rm -f "$user_agent_path"
+    return 1
   fi
   
   # Give the system a moment to process the bootstrap
   sleep 1
   
-  # Verify the daemon is loaded and properly configured
-  local daemon_status
-  daemon_status=$(sudo /bin/launchctl list | grep "${LAUNCHDAEMON_LABEL}" || echo "")
-  if [[ -z "${daemon_status}" ]]; then
-    log_error "LaunchDaemon not found after bootstrap"
-    sudo rm -f "${LAUNCHDAEMON_PATH}"
+  # Verify the agent is loaded and properly configured
+  local agent_status
+  agent_status=$(sudo launchctl asuser "$console_uid" launchctl list | grep "${user_agent_label}" || echo "")
+  if [[ -z "${agent_status}" ]]; then
+    log_error "LaunchAgent not found after bootstrap"
+    sudo -u "$console_user" rm -f "$user_agent_path"
     return 1
   fi
   
-  # Double-check StartCalendarInterval settings
-  local calendar_settings
-  calendar_settings=$(sudo plutil -p "${LAUNCHDAEMON_PATH}" | grep -A 4 StartCalendarInterval || echo "")
-  if [[ -z "${calendar_settings}" ]]; then
-    log_error "Calendar interval settings missing after bootstrap"
-    sudo rm -f "${LAUNCHDAEMON_PATH}"
-    return 1
-  fi
-  
-  # Display comprehensive verification
-  log_info "Verifying LaunchDaemon configuration:"
-  log_info "1. LaunchDaemon Path:"
-  ls -l "${LAUNCHDAEMON_PATH}" || echo "File not found"
-  log_info "2. LaunchDaemon Status:"
-  sudo launchctl list | grep "${LAUNCHDAEMON_LABEL}" || echo "Not loaded"
-  log_info "3. Calendar Interval Settings:"
-  sudo plutil -p "${LAUNCHDAEMON_PATH}" | grep -A 4 StartCalendarInterval || echo "No calendar settings found"
-  
-  log_info "LaunchDaemon scheduled for $(printf '%02d:%02d' "${hour_num}" "${minute_num}")${day:+ on day ${day}}${month:+ month ${month}}"
-  log_info "LaunchDaemon created and bootstrapped successfully"
-  return 0
+  # Double
 }
 
 # ---------------- Installer ----------------
 
 run_erase_install() {
+  log_info "Starting user detection for run_erase_install"
+  
   # Get current console user for UI display - enhanced for robustness
   local console_user=""
   console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+  log_debug "Detection method 1 result: '$console_user'"
+  
   if [ -z "$console_user" ]; then
     console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+    log_debug "Detection method 2 result: '$console_user'"
   fi
   if [ -z "$console_user" ]; then
     console_user=$(ls -l /dev/console | awk '{print $3}')
+    log_debug "Detection method 3 result: '$console_user'"
   fi
   if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
     console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+    log_debug "Detection method 4 result: '$console_user'"
   fi
-  [ -z "$console_user" ] && console_user="$SUDO_USER"
-  [ -z "$console_user" ] && console_user="$(id -un)"
+  [ -z "$console_user" ] && console_user="$SUDO_USER" && log_debug "Using SUDO_USER: '$console_user'"
+  [ -z "$console_user" ] && console_user="$(id -un)" && log_debug "Using current user: '$console_user'"
   
-  log_info "Detected console user: $console_user"
+  log_info "Detected console user: '$console_user'"
   local console_uid
   console_uid=$(id -u "$console_user")
+  log_info "User UID: $console_uid"
   
   # Remove any existing LaunchDaemons before starting
   remove_existing_launchdaemon
@@ -957,24 +931,32 @@ if [[ "$1" == "--scheduled" ]]; then
   # Initialize the environment for the scheduled run
   init_plist
   
+  log_info "Starting user detection for scheduled run"
+  
   # Get current console user info for UI display - enhanced for robustness
   local console_user=""
   console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+  log_debug "Detection method 1 result: '$console_user'"
+  
   if [ -z "$console_user" ]; then
     console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+    log_debug "Detection method 2 result: '$console_user'"
   fi
   if [ -z "$console_user" ]; then
     console_user=$(ls -l /dev/console | awk '{print $3}')
+    log_debug "Detection method 3 result: '$console_user'"
   fi
   if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
     console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+    log_debug "Detection method 4 result: '$console_user'"
   fi
-  [ -z "$console_user" ] && console_user="$SUDO_USER"
-  [ -z "$console_user" ] && console_user="$(id -un)"
+  [ -z "$console_user" ] && console_user="$SUDO_USER" && log_debug "Using SUDO_USER: '$console_user'"
+  [ -z "$console_user" ] && console_user="$(id -un)" && log_debug "Using current user: '$console_user'"
   
-  log_info "Detected console user: $console_user"
+  log_info "Detected console user: '$console_user'"
   local console_uid
   console_uid=$(id -u "$console_user")
+  log_info "User UID: $console_uid"
   
   # Set environment variables for UI
   export DISPLAY=:0
@@ -987,19 +969,22 @@ if [[ "$1" == "--scheduled" ]]; then
   
   # Run dialog as user with proper environment - enhanced for visibility
   log_info "Displaying scheduled installation dialog for user: $console_user"
+  log_info "About to display dialogs for user: '$console_user' with UID: $console_uid"
   
   # First, try a simple notification to alert the user
+  log_debug "Attempting AppleScript notification"
   sudo -i -u "$console_user" osascript -e "
     tell application \"System Events\"
       activate
       display dialog \"macOS Upgrade Scheduled\" buttons {\"OK\"} default button \"OK\" with title \"$PREINSTALL_TITLE\" with icon note giving up after 5
     end tell
-  " 2>/dev/null || true
+  " 2>&1 | log_debug "AppleScript result: $(cat -)" || log_debug "AppleScript notification failed"
   
   # Then use a more robust way to run the dialog with multiple techniques to ensure visibility
+  log_debug "Attempting SwiftDialog display via launchctl asuser"
   sudo launchctl asuser "$console_uid" sudo -u "$console_user" bash -c "
     export DISPLAY=:0
-    export XAUTHORITY=/Users/$console_user/.Xauthority
+    export XAUTHORITY=/Users/$console_user/.Xauthority 2>/dev/null
     export PATH='/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
     
     # Ensure dialog gets focus by using AppleScript

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.19] - 2025-05-01
+### Changed
+- Switched from system LaunchDaemon to user LaunchAgent for scheduled installations
+- Added multi-layered approach to UI visibility for scheduled runs
+- Enhanced console user detection with multiple fallback methods
+- Improved environment variable handling for GUI displays
+
+### Fixed
+- Resolved critical issue with UI not displaying during scheduled runs
+- Added robust user session detection and management
+- Implemented AppleScript notification as fallback mechanism
+- Fixed environment variable handling for GUI access in scheduled mode
+
+---
+
 ## [1.4.18] - 2025-05-01
 ### Added
 - Lock file mechanism to prevent multiple simultaneous scheduled executions
