@@ -229,113 +229,104 @@ get_deferral_state() {
 
 # Function to list all existing LaunchDaemons related to this script
 list_existing_launchdaemons() {
-  log_info "Searching for existing LaunchDaemons..."
-  # Find all LaunchDaemons that contain our label (full or partial matches)
-  local base_label=$(echo "${LAUNCHDAEMON_LABEL}" | cut -d. -f1-3)
-  local found_daemons=$(launchctl list | grep "${base_label}" | awk '{print $3}')
+  log_debug "Searching for existing LaunchDaemons..."
+  # Use a static base label for consistent search
+  local base_label="com.macjediwizard.eraseinstall"
+  local loaded_daemons="" fs_daemons=""
   
-  # Also check file system for related plist files that might not be loaded
-  local fs_daemons=$(find /Library/LaunchDaemons -name "*${base_label}*" -type f 2>/dev/null)
+  # First, get loaded daemons
+  if launchctl list &>/dev/null; then
+    loaded_daemons=$(launchctl list 2>/dev/null | grep -F "${base_label}" | awk '{print $3}' 2>/dev/null || echo "")
+  fi
   
-  # Combine and deduplicate results
-  echo "${found_daemons}"$'\n'"${fs_daemons}" | grep -v "^$" | sort | uniq
+  # Then, get filesystem daemons (both active and backup)
+  if [ -d "/Library/LaunchDaemons" ]; then
+    fs_daemons=$(find /Library/LaunchDaemons -type f \( -name "${base_label}*.plist" -o -name "${base_label}*.plist.bak" \) 2>/dev/null || echo "")
+  fi
+  
+  # Return unique entries, filtering empty lines
+  (echo "${loaded_daemons}"; echo "${fs_daemons}") | grep -v '^[[:space:]]*$' | sort -u
 }
 
 # Function to safely remove a single LaunchDaemon
-remove_launchdaemon() {
-  local daemon_path="$1"
-  local daemon_label=""
-  
-  # Extract label from plist if it's a file path
-  if [[ "${daemon_path}" == *".plist" ]]; then
-    daemon_label=$(defaults read "${daemon_path}" Label 2>/dev/null)
-    log_info "Processing LaunchDaemon: ${daemon_path} (Label: ${daemon_label:-unknown})"
-  else
-    # If we were passed a label directly
-    daemon_label="${daemon_path}"
-    daemon_path="/Library/LaunchDaemons/${daemon_label}.plist"
-    log_info "Processing LaunchDaemon with label: ${daemon_label}"
-  fi
-  
-  # Attempt to unload/bootout the daemon
-  if launchctl list | grep -q "${daemon_label}"; then
-    log_info "Unloading active LaunchDaemon: ${daemon_label}"
-    if ! launchctl bootout system "${daemon_path}" 2>/dev/null; then
-      log_warn "Failed to bootout LaunchDaemon via path, trying by label..."
-      if ! launchctl bootout system/${daemon_label} 2>/dev/null; then
-        log_error "Failed to unload LaunchDaemon: ${daemon_label}"
-        return 1
-      fi
-    fi
-  fi
-  
-  # Remove the file if it exists
-  if [ -f "${daemon_path}" ]; then
-    log_info "Removing LaunchDaemon file: ${daemon_path}"
-    if ! rm -f "${daemon_path}"; then
-      log_error "Failed to remove LaunchDaemon file: ${daemon_path}"
-      return 1
-    fi
-  fi
-  
-  log_info "LaunchDaemon ${daemon_label:-unknown} successfully removed."
-  return 0
-}
-
-# Enhanced function to remove all existing LaunchDaemons related to this script
 remove_existing_launchdaemon() {
   log_info "Checking for existing LaunchDaemons to remove..."
+  local found_count=0 
+  local removed_count=0
   
-  # First, try to remove the primary LaunchDaemon
-  if [ -f "${LAUNCHDAEMON_PATH}" ]; then
-    remove_launchdaemon "${LAUNCHDAEMON_PATH}"
-  fi
+  # First unload any loaded daemons
+  launchctl list 2>/dev/null | grep -F "com.macjediwizard.eraseinstall" | while read -r pid status label; do
+    if [ -n "${label}" ]; then
+      log_info "Unloading active daemon: ${label}"
+      # Try all methods to ensure unload
+      sudo launchctl bootout system/"${label}" 2>/dev/null || \
+      sudo launchctl bootout system "/Library/LaunchDaemons/${label}.plist" 2>/dev/null || \
+      sudo launchctl unload "/Library/LaunchDaemons/${label}.plist" 2>/dev/null
+      sleep 1  # Brief pause to ensure proper unload
+    fi
+  done
   
-  # Now find and remove any other related LaunchDaemons
-  local daemons=$(list_existing_launchdaemons)
-  local removal_count=0
-  local failure_count=0
+  # Find and remove all matching files
+  find /Library/LaunchDaemons -type f \( -name "com.macjediwizard.eraseinstall*.plist" -o -name "com.macjediwizard.eraseinstall*.plist.bak" \) 2>/dev/null | while read -r file; do
+    ((found_count++))
+    log_info "Removing LaunchDaemon file: ${file}"
+    if ! sudo rm -f "${file}" 2>/dev/null && ! rm -f "${file}" 2>/dev/null; then
+      log_error "Failed to remove: ${file}"
+    else
+      ((removed_count++))
+      log_info "Removed file: ${file}"
+    fi
+  done
   
-  if [ -n "${daemons}" ]; then
-    log_info "Found additional LaunchDaemons to clean up."
-    while IFS= read -r daemon; do
-      [ -z "${daemon}" ] && continue
-      
-      # Skip if this is the same as our primary LaunchDaemon (already handled)
-      if [ "${daemon}" = "${LAUNCHDAEMON_PATH}" ]; then
-        continue
-      fi
-      
-      if remove_launchdaemon "${daemon}"; then
-        removal_count=$((removal_count + 1))
+  # Final explicit check and removal of known paths
+  for file in "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak"; do
+    if [ -f "${file}" ]; then
+      log_warn "Found remaining LaunchDaemon file: ${file}"
+      if sudo rm -f "${file}" 2>/dev/null || rm -f "${file}" 2>/dev/null; then
+        log_info "Forcefully removed file: ${file}"
+        ((removed_count++))
       else
-        failure_count=$((failure_count + 1))
+        log_error "Failed to forcefully remove: ${file}"
       fi
-    done <<< "${daemons}"
-    
-    log_info "LaunchDaemon cleanup complete. Removed: ${removal_count}, Failed: ${failure_count}"
+    fi
+  done
+  
+  # Report results
+  if [ ${found_count} -gt 0 ]; then
+    log_info "LaunchDaemon cleanup complete. Removed: ${removed_count}, Failed: $((found_count - removed_count))"
   else
-    log_info "No additional LaunchDaemons found."
+    log_debug "No LaunchDaemons found to remove"
   fi
+  
+  # Verify cleanup
+  if [ -f "${LAUNCHDAEMON_PATH}" ] || [ -f "${LAUNCHDAEMON_PATH}.bak" ]; then
+    log_error "LaunchDaemon cleanup incomplete - files still exist"
+    return 1
+  fi
+  
+  return 0
 }
 
 create_scheduled_launchdaemon() {
   local hour="$1" minute="$2" day="$3" month="$4"
   
   # Convert hour and minute to base-10 to avoid octal interpretation
-  if [[ -n "$hour" ]]; then
-    hour=${hour#0}
-  fi
-  if [[ -n "$minute" ]]; then
-    minute=${minute#0}
-  fi
+  hour=${hour#0}
+  minute=${minute#0}
   
   # Ensure any existing LaunchDaemons are removed first
   remove_existing_launchdaemon
   
+  # Ensure the target directory exists
+  local daemon_dir="/Library/LaunchDaemons"
+  [ -d "${daemon_dir}" ] || mkdir -p "${daemon_dir}"
+  
+  # Double-check no files exist before creating new ones
+  sudo rm -f "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak" 2>/dev/null
+  
   log_info "Creating LaunchDaemon for $(printf '%02d:%02d' $((hour)) $((minute)))${day:+ on day $day}${month:+ month $month}"
   
-  # Use defaults to create a properly formatted plist file
+  # Create new LaunchDaemon
   defaults write "${LAUNCHDAEMON_PATH}" Label "${LAUNCHDAEMON_LABEL}"
   
   # Set up program arguments array
@@ -349,29 +340,39 @@ create_scheduled_launchdaemon() {
   
   # Set up calendar interval
   defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval -dict Hour ${hour} Minute ${minute}
-  [[ -n "$day" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval.Day -int ${day}
-  [[ -n "$month" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval.Month -int ${month}
+  [[ -n "$day" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval:Day -int ${day}
+  [[ -n "$month" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval:Month -int ${month}
   
   # Set RunAtLoad to false
   defaults write "${LAUNCHDAEMON_PATH}" RunAtLoad -bool false
   
-  # Set proper permissions
-  chmod 644 "${LAUNCHDAEMON_PATH}"
-  chown root:wheel "${LAUNCHDAEMON_PATH}"
+  # Set proper ownership and permissions
+  sudo chown root:wheel "${LAUNCHDAEMON_PATH}"
+  sudo chmod 644 "${LAUNCHDAEMON_PATH}"
   
-  # Use bootstrap instead of load for better compatibility
-  launchctl bootstrap system "${LAUNCHDAEMON_PATH}" 2>/dev/null || { log_error "Failed to bootstrap LaunchDaemon"; return 1; }
+  # Load the new LaunchDaemon
+  sudo launchctl bootstrap system "${LAUNCHDAEMON_PATH}" 2>/dev/null || \
+      { log_error "Failed to load LaunchDaemon"; return 1; }
+  
   log_info "LaunchDaemon created and loaded successfully"
+  return 0
 }
 
 # ---------------- Installer ----------------
 
 run_erase_install() {
+  # Remove any existing LaunchDaemons before starting
+  remove_existing_launchdaemon
+  
   local args=( /usr/bin/sudo "$SCRIPT_PATH" --reinstall --os="$INSTALLER_OS" --no-fs --check-power --min-drive-space=50 --cleanup-after-use )
   [[ "$TEST_MODE" = true ]] && args+=( --test-run )
   log_info "Running erase-install: ${args[*]}"
   "${args[@]}"
   local code=$?
+  
+  # Ensure LaunchDaemons are cleaned up after installation
+  remove_existing_launchdaemon
+  
   [[ $code -ne 0 ]] && log_error "erase-install failed with exit code $code"
   return $code
 }
@@ -379,6 +380,9 @@ run_erase_install() {
 show_preinstall() {
   local show_countdown="${1:-true}"
   local countdown=${PREINSTALL_COUNTDOWN:-60}
+  
+  # Remove any existing LaunchDaemons before starting
+  remove_existing_launchdaemon
   
   # Skip countdown if show_countdown is false
   if [[ "$show_countdown" == "false" ]]; then
@@ -448,8 +452,9 @@ show_preinstall() {
     log_info "Pre-install dialog completed countdown, continuing automatically"
   fi
   
-  # Run the installation
+  # Run the installation and ensure cleanup
   run_erase_install
+  remove_existing_launchdaemon
 }
 
 # -------------- Prompt Handling --------------
@@ -623,6 +628,10 @@ if [[ "$1" == "--scheduled" ]]; then
   # Show pre-install countdown window for scheduled installations
   log_info "Running scheduled installation with countdown"
   show_preinstall "true"
+  
+  # Final cleanup to ensure no LaunchDaemons remain
+  remove_existing_launchdaemon
+  
   exit 0
 fi
 
