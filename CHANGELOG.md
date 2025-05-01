@@ -7,19 +7,24 @@ All notable changes to this project will be documented in this file.
 - Lock file mechanism to prevent multiple simultaneous scheduled executions
 - Process tracking and cleanup for scheduled runs
 - Enhanced UI handling for scheduled installations
-- Improved user context management for dialog display
+- Native AppleScript notification as fallback for scheduled alerts
+- Multi-layered approach to ensure dialog visibility in all contexts
+- SessionCreate key to LaunchDaemon for proper UI session access
 
 ### Improved
+- Robust console user detection with multiple fallback methods
 - Better dialog visibility in scheduled mode with proper user context
 - Enhanced cleanup routine with retry mechanism
 - Added resource limits and process control to LaunchDaemons
 - Standardized environment variables for scheduled runs
+- Focus management for dialog windows using AppleScript activation
 
 ### Fixed
-- Issue with duplicate dialog display in scheduled mode
+- Dialog windows failing to appear during scheduled execution
 - UI visibility problems when running as root
 - Process cleanup and tracking during scheduled executions
 - Dialog window positioning and focus in scheduled mode
+- Environment variables for proper user session access
 
 ---
 

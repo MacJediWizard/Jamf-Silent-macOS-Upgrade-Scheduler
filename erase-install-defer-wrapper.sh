@@ -32,10 +32,13 @@
 #
 # CHANGELOG:
 # v1.4.18 - Enhanced scheduled execution reliability and UI display
+#         - Fixed dialog visibility issues in scheduled mode with multi-layered approach
+#         - Added native AppleScript notification as fallback for scheduled alerts
+#         - Improved console user detection with multiple fallback methods
+#         - Enhanced LaunchDaemon with SessionCreate for proper UI interaction
 #         - Added lock file mechanism to prevent multiple simultaneous executions
 #         - Improved scheduled installation UI visibility and user context handling
 #         - Added process tracking and enhanced cleanup procedures
-#         - Fixed dialog display issues in scheduled mode
 # v1.4.17 - Implemented centralized LaunchDaemon control mechanism, fixed time formatting issues, and improved window behavior
 # v1.4.16 - Fixed printf error with leading zeros by enforcing base-10 interpretation
 # v1.4.15 - Removed --mini flag and adjusted window dimensions for proper display of UI elements
@@ -441,6 +444,8 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
     </dict>
     <key>WorkingDirectory</key>
     <string>/tmp</string>
+    <key>SessionCreate</key>
+    <true/>
 </dict>
 </plist>"
 
@@ -513,10 +518,22 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
 # ---------------- Installer ----------------
 
 run_erase_install() {
-  # Get current console user for UI display
-  local console_user
-  console_user=$(who | grep "console" | awk '{print $1}')
-  [ -z "$console_user" ] && console_user=$(stat -f%Su /dev/console)
+  # Get current console user for UI display - enhanced for robustness
+  local console_user=""
+  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+  if [ -z "$console_user" ]; then
+    console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+  fi
+  if [ -z "$console_user" ]; then
+    console_user=$(ls -l /dev/console | awk '{print $3}')
+  fi
+  if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
+    console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  fi
+  [ -z "$console_user" ] && console_user="$SUDO_USER"
+  [ -z "$console_user" ] && console_user="$(id -un)"
+  
+  log_info "Detected console user: $console_user"
   local console_uid
   console_uid=$(id -u "$console_user")
   
@@ -940,10 +957,22 @@ if [[ "$1" == "--scheduled" ]]; then
   # Initialize the environment for the scheduled run
   init_plist
   
-  # Get current console user info for UI display
-  local console_user
-  console_user=$(who | grep "console" | awk '{print $1}')
-  [ -z "$console_user" ] && console_user=$(stat -f%Su /dev/console)
+  # Get current console user info for UI display - enhanced for robustness
+  local console_user=""
+  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+  if [ -z "$console_user" ]; then
+    console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+  fi
+  if [ -z "$console_user" ]; then
+    console_user=$(ls -l /dev/console | awk '{print $3}')
+  fi
+  if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
+    console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  fi
+  [ -z "$console_user" ] && console_user="$SUDO_USER"
+  [ -z "$console_user" ] && console_user="$(id -un)"
+  
+  log_info "Detected console user: $console_user"
   local console_uid
   console_uid=$(id -u "$console_user")
   
@@ -956,28 +985,44 @@ if [[ "$1" == "--scheduled" ]]; then
   DIALOG_POSITION="center"
   DIALOG_ICON="SF=gearshape.circle.fill"
   
-  # Run dialog as user with proper environment
-  log_info "Displaying scheduled installation dialog"
-  sudo -u "$console_user" bash -c "
+  # Run dialog as user with proper environment - enhanced for visibility
+  log_info "Displaying scheduled installation dialog for user: $console_user"
+  
+  # First, try a simple notification to alert the user
+  sudo -i -u "$console_user" osascript -e "
+    tell application \"System Events\"
+      activate
+      display dialog \"macOS Upgrade Scheduled\" buttons {\"OK\"} default button \"OK\" with title \"$PREINSTALL_TITLE\" with icon note giving up after 5
+    end tell
+  " 2>/dev/null || true
+  
+  # Then use a more robust way to run the dialog with multiple techniques to ensure visibility
+  sudo launchctl asuser "$console_uid" sudo -u "$console_user" bash -c "
     export DISPLAY=:0
+    export XAUTHORITY=/Users/$console_user/.Xauthority
     export PATH='/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
-    '$DIALOG_BIN' --title '$PREINSTALL_TITLE' \
-      --message '$PREINSTALL_MESSAGE' \
-      --button1text '$PREINSTALL_CONTINUE_TEXT' \
-      --icon '$DIALOG_ICON' \
-      --height 200 \
-      --width 500 \
-      --moveable \
-      --ontop \
-      --forefront \
-      --position center \
-      --messagefont 'size=14' \
-      --blurscreen \
-      --progress 60 \
-      --progresstext 'Installation will begin in 60 seconds...' \
-      --timer 60 \
-      --bannerimage '/System/Library/PreferencePanes/SoftwareUpdate.prefPane/Contents/Resources/SoftwareUpdate.icns' \
-      --bannertitle 'Scheduled macOS Upgrade'"
+    
+    # Ensure dialog gets focus by using AppleScript
+    osascript -e 'tell application \"System Events\" to activate' &
+    
+    \"$DIALOG_BIN\" --title \"$PREINSTALL_TITLE\" \\
+      --message \"$PREINSTALL_MESSAGE\" \\
+      --button1text \"$PREINSTALL_CONTINUE_TEXT\" \\
+      --icon \"$DIALOG_ICON\" \\
+      --height 200 \\
+      --width 500 \\
+      --moveable \\
+      --ontop \\
+      --forefront \\
+      --position center \\
+      --messagefont 'size=14' \\
+      --blurscreen \\
+      --progress 60 \\
+      --progresstext \"Installation will begin in 60 seconds...\" \\
+      --timer 60 \\
+      --bannerimage \"/System/Library/PreferencePanes/SoftwareUpdate.prefPane/Contents/Resources/SoftwareUpdate.icns\" \\
+      --bannertitle \"Scheduled macOS Upgrade\" \\
+      --quitkey k"
 
   sleep 2  # Brief pause to ensure dialog is displayed
 
