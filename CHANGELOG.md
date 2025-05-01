@@ -11,10 +11,14 @@ All notable changes to this project will be documented in this file.
 - Enhanced LaunchDaemon cleanup to find and remove all instances
 - Added logging for LaunchDaemon discovery and removal
 - Added error handling for failed removals
+- Optimized window behavior for different installation paths
+- Streamlined "Install Now" path to go directly to installation without countdown
 
 ### Fixed
 - Fixed time formatting in printf commands to prevent "invalid number" errors
 - Improved handling of time values with leading zeros
+- Fixed duplicate window display in "Install Now" workflow
+- Ensured proper LaunchDaemon creation/removal for scheduled installations
 
 ---
 

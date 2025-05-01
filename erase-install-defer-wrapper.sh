@@ -31,7 +31,7 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
-# v1.4.17 - Implemented centralized LaunchDaemon control mechanism and fixed time formatting issues
+# v1.4.17 - Implemented centralized LaunchDaemon control mechanism, fixed time formatting issues, and improved window behavior
 # v1.4.16 - Fixed printf error with leading zeros by enforcing base-10 interpretation
 # v1.4.15 - Removed --mini flag and adjusted window dimensions for proper display of UI elements
 # v1.4.14 - Added --mini flag to all SwiftDialog commands, implemented proper countdown with auto-continue
@@ -377,7 +377,16 @@ run_erase_install() {
 }
 
 show_preinstall() {
+  local show_countdown="${1:-true}"
   local countdown=${PREINSTALL_COUNTDOWN:-60}
+  
+  # Skip countdown if show_countdown is false
+  if [[ "$show_countdown" == "false" ]]; then
+    log_info "Skipping pre-install countdown, proceeding directly to installation..."
+    run_erase_install
+    return
+  fi
+  
   log_info "Showing pre-install countdown ($countdown seconds)..."
   
   # Create a temporary file to track countdown progress
@@ -523,7 +532,9 @@ show_prompt() {
       # Ensure any existing LaunchDaemons are removed for "Install Now"
       remove_existing_launchdaemon
       reset_deferrals
-      show_preinstall
+      # Skip countdown for immediate installations - go directly to installation
+      log_info "Install Now selected - proceeding directly to installation"
+      run_erase_install
     ;;
     "${DIALOG_SCHEDULE_TODAY_TEXT}")
       local sched subcode time_data hour minute day month
@@ -567,7 +578,8 @@ show_prompt() {
       if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
         log_warn "Maximum deferrals (${MAX_DEFERS}) reached."
         reset_deferrals
-        show_preinstall
+        # Show countdown for installations after deferral expiry
+        show_preinstall "true"
       else
         newCount=$((deferCount + 1))
         defaults write "${PLIST}" deferCount -int "$newCount"
@@ -608,8 +620,9 @@ if [[ "$1" == "--scheduled" ]]; then
   dependency_check
   # Ensure any existing LaunchDaemons are removed before running erase-install
   remove_existing_launchdaemon
-  # Show pre-install countdown window before running erase-install
-  show_preinstall
+  # Show pre-install countdown window for scheduled installations
+  log_info "Running scheduled installation with countdown"
+  show_preinstall "true"
   exit 0
 fi
 
