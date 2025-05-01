@@ -14,10 +14,14 @@ Now with **automatic dependency installation**, **dynamic dialog configuration**
 - 🛡 Minimal user interruption
 - ⏳ 24-hour deferral support (up to 3 times)
 - 🔒 Forced upgrade after 72 hours or 3 deferrals
-- 📅 User scheduling via LaunchDaemon
+- 📅 User scheduling via LaunchDaemon with reliable execution tracking
+- 🔐 Lock file mechanism to prevent multiple simultaneous executions
+- 🎯 Enhanced UI handling with proper user context display
 - 🛠 Full dry-run testing with erase-install's `--test-run`
 - 📦 Auto-installs erase-install and swiftDialog if missing
 - ✍️ Configurable dialog text, button labels, and window position
+- 🔄 Robust process tracking and cleanup procedures
+- 📊 Resource limits and process control for LaunchDaemons
 - ✅ Enterprise-grade error handling, structured logging (INFO/WARN/ERROR/DEBUG)
 
 ---

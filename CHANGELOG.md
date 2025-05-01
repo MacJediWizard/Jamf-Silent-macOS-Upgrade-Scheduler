@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.18] - 2025-05-01
+### Added
+- Lock file mechanism to prevent multiple simultaneous scheduled executions
+- Process tracking and cleanup for scheduled runs
+- Enhanced UI handling for scheduled installations
+- Improved user context management for dialog display
+
+### Improved
+- Better dialog visibility in scheduled mode with proper user context
+- Enhanced cleanup routine with retry mechanism
+- Added resource limits and process control to LaunchDaemons
+- Standardized environment variables for scheduled runs
+
+### Fixed
+- Issue with duplicate dialog display in scheduled mode
+- UI visibility problems when running as root
+- Process cleanup and tracking during scheduled executions
+- Dialog window positioning and focus in scheduled mode
+
+---
+
 
 ## [1.4.17] - 2025-04-30
 ### Added

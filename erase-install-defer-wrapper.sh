@@ -31,6 +31,11 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.4.18 - Enhanced scheduled execution reliability and UI display
+#         - Added lock file mechanism to prevent multiple simultaneous executions
+#         - Improved scheduled installation UI visibility and user context handling
+#         - Added process tracking and enhanced cleanup procedures
+#         - Fixed dialog display issues in scheduled mode
 # v1.4.17 - Implemented centralized LaunchDaemon control mechanism, fixed time formatting issues, and improved window behavior
 # v1.4.16 - Fixed printf error with leading zeros by enforcing base-10 interpretation
 # v1.4.15 - Removed --mini flag and adjusted window dimensions for proper display of UI elements
@@ -56,13 +61,16 @@
 
 PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
 SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
-DIALOG_BIN="/usr/local/bin/dialog"
+DIALOG_BIN="/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog"
+# Fallback to traditional location if primary doesn't exist
+[ ! -x "$DIALOG_BIN" ] && DIALOG_BIN="/usr/local/bin/dialog"
 
-SCRIPT_VERSION="1.4.17"
+SCRIPT_VERSION="1.4.18"
 INSTALLER_OS="15"
 MAX_DEFERS=3
 FORCE_TIMEOUT_SECONDS=259200
 
+# Set to false for production
 TEST_MODE=true
 AUTO_INSTALL_DEPENDENCIES=true
 DEBUG_MODE=true
@@ -174,9 +182,37 @@ install_erase_install() {
 install_swiftDialog() {
   log_info "swiftDialog not found. Downloading and installing..."
   local tmp; tmp=$(mktemp -d)
+  
+  # Download the latest version of swiftDialog
+  log_info "Downloading latest swiftDialog..."
   curl -fsSL -o "${tmp}/dialog.pkg" "https://github.com/bartreardon/swiftDialog/releases/latest/download/dialog.pkg" || { log_error "Failed to download swiftDialog."; rm -rf "${tmp}"; return 1; }
+  
+  # Install the package
+  log_info "Installing swiftDialog package..."
   /usr/sbin/installer -pkg "${tmp}/dialog.pkg" -target / || { log_error "Installation of swiftDialog failed."; rm -rf "${tmp}"; return 1; }
-  log_info "swiftDialog installed successfully."
+  
+  # Create a symlink from the app location to /usr/local/bin if needed
+  if [ -e "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/Dialog" ]; then
+    log_info "Creating symlink for swiftDialog in /usr/local/bin..."
+    mkdir -p /usr/local/bin
+    ln -sf "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/Dialog" "/usr/local/bin/dialog"
+  elif [ -e "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog" ]; then
+    log_info "Creating symlink for erase-install bundled swiftDialog in /usr/local/bin..."
+    mkdir -p /usr/local/bin
+    ln -sf "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog" "/usr/local/bin/dialog"
+  fi
+  
+  # Verify the installation
+  if [ -x "/usr/local/bin/dialog" ]; then
+    log_info "swiftDialog installed and accessible at /usr/local/bin/dialog"
+  else
+    log_error "swiftDialog installation verification failed - binary not found at expected location"
+    # Try to find where Dialog might be installed
+    log_info "Searching for Dialog binary..."
+    find /Library -name "Dialog" -type f -executable 2>/dev/null || log_error "Could not locate Dialog binary"
+  fi
+  
+  log_info "swiftDialog installation completed."
   rm -rf "${tmp}"
 }
 
@@ -254,35 +290,53 @@ remove_existing_launchdaemon() {
   local found_count=0 
   local removed_count=0
   
-  # First unload any loaded daemons
+  # Check if this is a scheduled run
+  local is_scheduled=false
+  [[ "$1" == "--preserve-scheduled" ]] && is_scheduled=true
+  
+  # First bootout any non-scheduled daemons
   launchctl list 2>/dev/null | grep -F "com.macjediwizard.eraseinstall" | while read -r pid status label; do
     if [ -n "${label}" ]; then
-      log_info "Unloading active daemon: ${label}"
-      # Try all methods to ensure unload
-      sudo launchctl bootout system/"${label}" 2>/dev/null || \
-      sudo launchctl bootout system "/Library/LaunchDaemons/${label}.plist" 2>/dev/null || \
-      sudo launchctl unload "/Library/LaunchDaemons/${label}.plist" 2>/dev/null
-      sleep 1  # Brief pause to ensure proper unload
+      # Skip scheduled daemons if we're preserving them
+      if [[ "${is_scheduled}" == "true" ]] && sudo launchctl list "${label}" 2>/dev/null | grep -q -- "--scheduled"; then
+        log_info "Preserving scheduled daemon: ${label}"
+        continue
+      fi
+      
+      log_info "Booting out daemon: ${label}"
+      if ! sudo launchctl bootout system/$(sudo launchctl list | grep "${label}" | awk '{print $3}'); then
+        log_error "Failed to bootout: ${label}"
+      else
+        log_info "Successfully booted out: ${label}"
+      fi
     fi
   done
   
-  # Find and remove all matching files
-  find /Library/LaunchDaemons -type f \( -name "com.macjediwizard.eraseinstall*.plist" -o -name "com.macjediwizard.eraseinstall*.plist.bak" \) 2>/dev/null | while read -r file; do
+  # Then remove matching files, preserving scheduled if needed
+  while IFS= read -r file; do
+    [ -z "${file}" ] && continue
+    
+    # Skip scheduled daemons if we're preserving them
+    if [[ "${is_scheduled}" == "true" ]] && grep -q -- "--scheduled" "${file}" 2>/dev/null; then
+      log_info "Preserving scheduled daemon file: ${file}"
+      continue
+    fi
+    
     ((found_count++))
     log_info "Removing LaunchDaemon file: ${file}"
-    if ! sudo rm -f "${file}" 2>/dev/null && ! rm -f "${file}" 2>/dev/null; then
-      log_error "Failed to remove: ${file}"
-    else
+    if sudo rm -f "${file}"; then
       ((removed_count++))
       log_info "Removed file: ${file}"
+    else
+      log_error "Failed to remove: ${file}"
     fi
-  done
+  done < <(find /Library/LaunchDaemons -type f \( -name "com.macjediwizard.eraseinstall*.plist" -o -name "com.macjediwizard.eraseinstall*.plist.bak" \) 2>/dev/null)
   
   # Final explicit check and removal of known paths
   for file in "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak"; do
     if [ -f "${file}" ]; then
       log_warn "Found remaining LaunchDaemon file: ${file}"
-      if sudo rm -f "${file}" 2>/dev/null || rm -f "${file}" 2>/dev/null; then
+      if sudo rm -f "${file}"; then
         log_info "Forcefully removed file: ${file}"
         ((removed_count++))
       else
@@ -308,13 +362,15 @@ remove_existing_launchdaemon() {
 }
 
 create_scheduled_launchdaemon() {
-  local hour="$1" minute="$2" day="$3" month="$4"
+  local hour="$1" minute="$2" day="$3" month="$4" mode="$5"
   
-  # Convert hour and minute to base-10 to avoid octal interpretation
-  hour=${hour#0}
-  minute=${minute#0}
+  # Convert all values to base-10 integers
+  local hour_num=$((10#${hour}))
+  local minute_num=$((10#${minute}))
+  local day_num=$([ -n "$day" ] && printf '%d' "$((10#${day}))" || echo "")
+  local month_num=$([ -n "$month" ] && printf '%d' "$((10#${month}))" || echo "")
   
-  # Ensure any existing LaunchDaemons are removed first
+  # Remove existing daemons and ensure clean state
   remove_existing_launchdaemon
   
   # Ensure the target directory exists
@@ -324,57 +380,216 @@ create_scheduled_launchdaemon() {
   # Double-check no files exist before creating new ones
   sudo rm -f "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak" 2>/dev/null
   
-  log_info "Creating LaunchDaemon for $(printf '%02d:%02d' $((hour)) $((minute)))${day:+ on day $day}${month:+ month $month}"
+  log_info "Creating LaunchDaemon for $(printf '%02d:%02d' "${hour_num}" "${minute_num}")${day:+ on day $day_num}${month:+ month $month_num}"
   
-  # Create new LaunchDaemon
-  defaults write "${LAUNCHDAEMON_PATH}" Label "${LAUNCHDAEMON_LABEL}"
-  
-  # Set up program arguments array
-  local args=()
-  args+=("/bin/bash" "${WRAPPER_PATH}")
-  # Add --scheduled parameter only for non-prompt mode
-  if [[ "$5" != "prompt" ]]; then
-    args+=("--scheduled")
-  fi
-  defaults write "${LAUNCHDAEMON_PATH}" ProgramArguments -array "${args[@]}"
-  
-  # Set up calendar interval
-  defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval -dict Hour ${hour} Minute ${minute}
-  [[ -n "$day" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval:Day -int ${day}
-  [[ -n "$month" ]] && defaults write "${LAUNCHDAEMON_PATH}" StartCalendarInterval:Month -int ${month}
-  
-  # Set RunAtLoad to false
-  defaults write "${LAUNCHDAEMON_PATH}" RunAtLoad -bool false
+  # Create the plist content atomically
+  local plist_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHDAEMON_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${WRAPPER_PATH}</string>
+        <string>--scheduled</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${hour_num}</integer>
+        <key>Minute</key>
+        <integer>${minute_num}</integer>
+$([ -n "${day_num}" ] && printf "        <key>Day</key>\n        <integer>%d</integer>\n" "${day_num}")
+$([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d</integer>\n" "${month_num}")
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/erase-install-wrapper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/erase-install-wrapper.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>ExitTimeOut</key>
+    <integer>300</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>Nice</key>
+    <integer>0</integer>
+    <key>LowPriorityIO</key>
+    <false/>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>8192</integer>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+</dict>
+</plist>"
+
+  # Write plist content atomically
+  printf "%s" "${plist_content}" | sudo tee "${LAUNCHDAEMON_PATH}" > /dev/null
   
   # Set proper ownership and permissions
   sudo chown root:wheel "${LAUNCHDAEMON_PATH}"
   sudo chmod 644 "${LAUNCHDAEMON_PATH}"
   
-  # Load the new LaunchDaemon
-  sudo launchctl bootstrap system "${LAUNCHDAEMON_PATH}" 2>/dev/null || \
-      { log_error "Failed to load LaunchDaemon"; return 1; }
+  # Validate plist
+  if ! sudo plutil -lint "${LAUNCHDAEMON_PATH}"; then
+    log_error "Invalid LaunchDaemon plist"
+    sudo rm -f "${LAUNCHDAEMON_PATH}"
+    return 1
+  fi
   
-  log_info "LaunchDaemon created and loaded successfully"
+  # Display plist content for debugging
+  log_debug "Generated plist content:"
+  log_debug "$(sudo plutil -p "${LAUNCHDAEMON_PATH}")"
+  
+  # Bootstrap the daemon with proper path and verification
+  log_info "Bootstrapping LaunchDaemon..."
+  if ! sudo /bin/launchctl bootstrap system "${LAUNCHDAEMON_PATH}"; then
+    log_error "Failed to bootstrap LaunchDaemon"
+    # Try loading as a fallback method
+    if ! sudo /bin/launchctl load "${LAUNCHDAEMON_PATH}"; then
+      log_error "Failed to load LaunchDaemon after bootstrap failure"
+      sudo rm -f "${LAUNCHDAEMON_PATH}"
+      return 1
+    fi
+    log_info "Successfully loaded LaunchDaemon with fallback method"
+  fi
+  
+  # Give the system a moment to process the bootstrap
+  sleep 1
+  
+  # Verify the daemon is loaded and properly configured
+  local daemon_status
+  daemon_status=$(sudo /bin/launchctl list | grep "${LAUNCHDAEMON_LABEL}" || echo "")
+  if [[ -z "${daemon_status}" ]]; then
+    log_error "LaunchDaemon not found after bootstrap"
+    sudo rm -f "${LAUNCHDAEMON_PATH}"
+    return 1
+  fi
+  
+  # Double-check StartCalendarInterval settings
+  local calendar_settings
+  calendar_settings=$(sudo plutil -p "${LAUNCHDAEMON_PATH}" | grep -A 4 StartCalendarInterval || echo "")
+  if [[ -z "${calendar_settings}" ]]; then
+    log_error "Calendar interval settings missing after bootstrap"
+    sudo rm -f "${LAUNCHDAEMON_PATH}"
+    return 1
+  fi
+  
+  # Display comprehensive verification
+  log_info "Verifying LaunchDaemon configuration:"
+  log_info "1. LaunchDaemon Path:"
+  ls -l "${LAUNCHDAEMON_PATH}" || echo "File not found"
+  log_info "2. LaunchDaemon Status:"
+  sudo launchctl list | grep "${LAUNCHDAEMON_LABEL}" || echo "Not loaded"
+  log_info "3. Calendar Interval Settings:"
+  sudo plutil -p "${LAUNCHDAEMON_PATH}" | grep -A 4 StartCalendarInterval || echo "No calendar settings found"
+  
+  log_info "LaunchDaemon scheduled for $(printf '%02d:%02d' "${hour_num}" "${minute_num}")${day:+ on day ${day}}${month:+ month ${month}}"
+  log_info "LaunchDaemon created and bootstrapped successfully"
   return 0
 }
 
 # ---------------- Installer ----------------
 
 run_erase_install() {
+  # Get current console user for UI display
+  local console_user
+  console_user=$(who | grep "console" | awk '{print $1}')
+  [ -z "$console_user" ] && console_user=$(stat -f%Su /dev/console)
+  local console_uid
+  console_uid=$(id -u "$console_user")
+  
   # Remove any existing LaunchDaemons before starting
   remove_existing_launchdaemon
   
+  # Kill any existing erase-install processes
+  log_info "Checking for existing erase-install processes..."
+  
+  # Get our script's process group
+  local our_pgid=$(ps -o pgid= -p $$)
+  
+  # Find processes more precisely, excluding our own process group
+  local pids
+  pids=$(ps -e -o pid=,pgid=,command= | \
+    awk -v pgid="$our_pgid" '
+      $0 ~ /[e]rase-install.sh|[e]rase-install-defer-wrapper.sh/ && 
+      $2 != pgid { 
+        print $1 
+      }
+    ')
+  
+  if [ -n "${pids}" ]; then
+    log_info "Found existing erase-install processes. Cleaning up..."
+    echo "${pids}" | while read -r pid; do
+      if sudo kill -15 "${pid}" 2>/dev/null; then
+        log_info "Terminated process ${pid}"
+      fi
+    done
+    
+    sleep 1
+    
+    # Verify no processes remain
+    pids=$(ps -e -o pid=,pgid=,command= | \
+      awk -v pgid="$our_pgid" '
+        $0 ~ /[e]rase-install.sh|[e]rase-install-defer-wrapper.sh/ && 
+        $2 != pgid { 
+          print $1 
+        }
+      ')
+      
+    if [ -n "${pids}" ]; then
+      echo "${pids}" | while read -r pid; do
+        sudo kill -9 "${pid}" 2>/dev/null && \
+          log_info "Force terminated process ${pid}" || \
+          log_error "Failed to terminate process ${pid}"
+      done
+    fi
+  fi
+  
+  # Run the installation with proper user context for UI
+  log_info "Starting erase-install..."
   local args=( /usr/bin/sudo "$SCRIPT_PATH" --reinstall --os="$INSTALLER_OS" --no-fs --check-power --min-drive-space=50 --cleanup-after-use )
   [[ "$TEST_MODE" = true ]] && args+=( --test-run )
   log_info "Running erase-install: ${args[*]}"
-  "${args[@]}"
-  local code=$?
   
-  # Ensure LaunchDaemons are cleaned up after installation
-  remove_existing_launchdaemon
+  # Set UI environment for the console user
+  export DISPLAY=:0
+  launchctl asuser "$console_uid" sudo -u "$console_user" defaults write org.swift.SwiftDialog FrontmostApplication -bool true
   
-  [[ $code -ne 0 ]] && log_error "erase-install failed with exit code $code"
-  return $code
+  # Execute with proper error handling
+  if ! "${args[@]}"; then
+    log_error "erase-install command failed"
+    return 1
+  fi
+  
+  # Clean up after test run
+  if [[ "$TEST_MODE" = true ]]; then
+    log_info "Test run completed successfully"
+    remove_existing_launchdaemon
+  fi
+  
+  return 0
 }
 
 show_preinstall() {
@@ -384,14 +599,14 @@ show_preinstall() {
   # Remove any existing LaunchDaemons before starting
   remove_existing_launchdaemon
   
+  log_info "Starting pre-installation sequence with countdown: $show_countdown"
+  
   # Skip countdown if show_countdown is false
   if [[ "$show_countdown" == "false" ]]; then
     log_info "Skipping pre-install countdown, proceeding directly to installation..."
     run_erase_install
     return
   fi
-  
-  log_info "Showing pre-install countdown ($countdown seconds)..."
   
   # Create a temporary file to track countdown progress
   local tmp_progress
@@ -414,12 +629,13 @@ show_preinstall() {
   
   local dialog_pid=$!
   local countdown_remaining=$countdown
+  local dialog_closed=false
   
   # Update countdown progress
   while [[ $countdown_remaining -gt 0 ]]; do
     # Check if the dialog is still running
     if ! kill -0 $dialog_pid 2>/dev/null; then
-      # Dialog was closed/button pressed - continue immediately
+      dialog_closed=true
       log_info "Pre-install dialog closed by user, continuing immediately"
       break
     fi
@@ -436,14 +652,14 @@ show_preinstall() {
   done
   
   # Kill dialog if still running
-  if kill -0 $dialog_pid 2>/dev/null; then
+  if ! $dialog_closed && kill -0 $dialog_pid 2>/dev/null; then
     kill $dialog_pid 2>/dev/null
   fi
   
   # Cleanup temp file
   rm -f "$tmp_progress"
   
-  # Check if dialog was closed by user action
+  # Process dialog output if available
   if [ -f /tmp/dialog_output.json ]; then
     local btn=$(cat /tmp/dialog_output.json | grep "button" | cut -d':' -f2 | tr -d '" ,')
     log_info "Pre-install dialog returned: [$btn] (or timed out)"
@@ -452,9 +668,13 @@ show_preinstall() {
     log_info "Pre-install dialog completed countdown, continuing automatically"
   fi
   
-  # Run the installation and ensure cleanup
+  # Run the installation
+  log_info "Starting installation after countdown"
   run_erase_install
+  
+  # Final cleanup
   remove_existing_launchdaemon
+  log_info "Installation sequence completed"
 }
 
 # -------------- Prompt Handling --------------
@@ -477,14 +697,31 @@ set_options() {
 
 generate_time_options() {
   local current_hour; current_hour=$(date +%-H)
+  local current_minute; current_minute=$(date +%-M)
   local next_hour=$((current_hour + 1))
   local time_options=""
   
+  # For current hour, only show future times (in 15-minute intervals)
+  if [ $current_minute -lt 45 ]; then
+    local formatted_hour; formatted_hour=$(printf "%02d" "$current_hour")
+    # Calculate next available 15-minute interval
+    if [ $current_minute -lt 15 ]; then
+      time_options="${formatted_hour}:15"
+    fi
+    if [ $current_minute -lt 30 ]; then
+      time_options="${time_options}${time_options:+,}${formatted_hour}:30"
+    fi
+    if [ $current_minute -lt 45 ]; then
+      time_options="${time_options}${time_options:+,}${formatted_hour}:45"
+    fi
+  fi
+  
+  # For remaining hours of the day
   for h in $(seq "$next_hour" 23); do
     # Convert hour to base-10 explicitly to avoid octal interpretation
     local h_base10=$((h))
     local formatted_hour; formatted_hour=$(printf "%02d" "$h_base10")
-    time_options="${time_options}${time_options:+,}${formatted_hour}:00,${formatted_hour}:30"
+    time_options="${time_options}${time_options:+,}${formatted_hour}:00,${formatted_hour}:15,${formatted_hour}:30,${formatted_hour}:45"
   done
   
   local count; count=$(echo "$time_options" | tr ',' '\n' | wc -l | tr -d ' ')
@@ -493,7 +730,7 @@ generate_time_options() {
       # Convert hour to base-10 explicitly to avoid octal interpretation
       local h_base10=$((h))
       local th; th=$(printf "%02d" "$h_base10")
-      time_options="${time_options}${time_options:+,}Tomorrow ${th}:00"
+      time_options="${time_options}${time_options:+,}Tomorrow ${th}:00,Tomorrow ${th}:15,Tomorrow ${th}:30,Tomorrow ${th}:45"
     done
   fi
   
@@ -508,14 +745,18 @@ validate_time() {
     local t; t=$(echo "$input" | awk '{print $2}')
     hour=$(echo "$t" | cut -d: -f1)
     minute=$(echo "$t" | cut -d: -f2)
+    # Convert hour to base 10 to handle leading zeros
+    hour=$((10#${hour}))
     day=$(date -v+1d +%d)
     month=$(date -v+1d +%m)
-    printf "tomorrow %s %s %s %s" "$hour" "$minute" "$day" "$month"
+    printf "tomorrow %02d %s %s %s" "$hour" "$minute" "$day" "$month"
   else
     hour=$(echo "$input" | cut -d: -f1)
     minute=$(echo "$input" | cut -d: -f2)
-    [[ $hour -ge 0 && $hour -le 23 && $minute -ge 0 && $minute -le 59 ]] || return 1
-    printf "today %s %s" "$hour" "$minute"
+    # Convert hour to base 10 to handle leading zeros
+    hour=$((10#${hour}))
+    [[ $hour -ge 0 && $hour -le 23 && $((10#$minute)) -ge 0 && $((10#$minute)) -le 59 ]] || return 1
+    printf "today %02d %s" "$hour" "$minute"
   fi
 }
 
@@ -560,21 +801,28 @@ show_prompt() {
       fi
       
       # Parse time data
+      # Parse time data
       read -r when hour minute day month <<< "$time_data"
       
       # Convert to proper numeric values for display
       local hour_num=${hour#0}
       local minute_num=${minute#0}
       
-      # Ensure existing LaunchDaemons are removed before creating a new one
+      # Remove any existing daemons
       remove_existing_launchdaemon
       
       if [[ "$when" == "tomorrow" ]]; then
         log_info "Scheduling for tomorrow at $(printf '%02d:%02d' $((hour_num)) $((minute_num)))"
-        create_scheduled_launchdaemon "$hour" "$minute" "$day" "$month" "install"
+        if ! create_scheduled_launchdaemon "$hour" "$minute" "$day" "$month" "scheduled"; then
+          log_error "Failed to create scheduled LaunchDaemon for tomorrow"
+          exit 1
+        fi
       else
         log_info "Scheduling for today at $(printf '%02d:%02d' $((hour_num)) $((minute_num)))"
-        create_scheduled_launchdaemon "$hour" "$minute" "" "" "install"
+        if ! create_scheduled_launchdaemon "${hour}" "${minute}" "" "" "scheduled"; then
+          log_error "Failed to create scheduled LaunchDaemon"
+          exit 1
+        fi
       fi
       
       reset_deferrals
@@ -590,21 +838,25 @@ show_prompt() {
         defaults write "${PLIST}" deferCount -int "$newCount"
         log_info "Deferred (${newCount}/${MAX_DEFERS})"
         
+        # Get tomorrow's time
         local defer_hour; defer_hour=$(date -v+24H +%H)
         local defer_min; defer_min=$(date -v+24H +%M)
         local defer_day; defer_day=$(date -v+1d +%d)
         local defer_month; defer_month=$(date -v+1d +%m)
         
-        # Convert to base-10 to avoid octal interpretation
-        local defer_hour_num=${defer_hour#0}
-        local defer_min_num=${defer_min#0}
-        
-        # Ensure existing LaunchDaemons are removed before creating a new one
+        # Ensure clean state
         remove_existing_launchdaemon
         
-        # Create the LaunchDaemon for tomorrow
-        create_scheduled_launchdaemon "$defer_hour" "$defer_min" "$defer_day" "$defer_month" "prompt"
-        log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "$defer_hour_num" "$defer_min_num")"
+        # Create LaunchDaemon with original time values (preserving leading zeros)
+        if create_scheduled_launchdaemon "${defer_hour}" "${defer_min}" "${defer_day}" "${defer_month}" "prompt"; then
+            # Base-10 conversion only for display
+            local display_hour=$((10#${defer_hour}))
+            local display_min=$((10#${defer_min}))
+            log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "${display_hour}" "${display_min}")"
+        else
+            log_error "Failed to schedule re-prompt"
+            exit 1
+        fi
       fi
       ;;
     *)
@@ -619,20 +871,122 @@ show_prompt() {
 # ---------------- Main ----------------
 
 if [[ "$1" == "--scheduled" ]]; then
+  # Initialize logging first
   init_logging
-  log_info "Running in scheduled mode"
+  log_info "Starting scheduled installation process (PID: $$)"
+  
+  # Define cleanup function
+  cleanup_and_exit() {
+    local exit_code=$?
+    log_info "Cleaning up scheduled installation process"
+    # Try to remove LaunchDaemon multiple times if needed
+    local retries=3
+    while [ $retries -gt 0 ]; do
+      if remove_existing_launchdaemon; then
+        break
+      fi
+      retries=$((retries - 1))
+      [ $retries -gt 0 ] && sleep 1
+    done
+    if [ -n "$LOCK_FILE" ]; then
+      rm -rf "$LOCK_FILE" "$LOCK_TIMESTAMP"
+    fi
+    log_info "Scheduled installation process completed (exit code: $exit_code)"
+    exit $exit_code
+  }
+  
+  # Set up trap immediately
+  trap 'cleanup_and_exit' EXIT TERM INT
+  
+  # Create a timestamped lock file for better tracking
+  LOCK_FILE="/var/run/erase-install-wrapper.lock"
+  LOCK_TIMESTAMP="/var/run/erase-install-wrapper.timestamp"
+  
+  # Check if another instance is already running
+  if ! mkdir "$LOCK_FILE" 2>/dev/null; then
+    if [ -f "$LOCK_TIMESTAMP" ]; then
+      LOCK_AGE=$(($(date +%s) - $(cat "$LOCK_TIMESTAMP")))
+      if [ $LOCK_AGE -gt 300 ]; then  # 5 minutes
+        log_warn "Removing stale lock file (age: ${LOCK_AGE}s)"
+        rm -rf "$LOCK_FILE" "$LOCK_TIMESTAMP"
+        mkdir "$LOCK_FILE"
+      else
+        log_error "Another instance is running (started ${LOCK_AGE}s ago). Exiting."
+        exit 1
+      fi
+    else
+      log_error "Lock file exists but no timestamp found. Cleaning up."
+      rm -rf "$LOCK_FILE"
+      mkdir "$LOCK_FILE"
+    fi
+  fi
+  
+  # Record start time
+  date +%s > "$LOCK_TIMESTAMP"
+  
+  # Ensure cleanup on exit - trap is already set up above
+  
   log_system_info
-  dependency_check
-  # Ensure any existing LaunchDaemons are removed before running erase-install
-  remove_existing_launchdaemon
-  # Show pre-install countdown window for scheduled installations
-  log_info "Running scheduled installation with countdown"
-  show_preinstall "true"
   
-  # Final cleanup to ensure no LaunchDaemons remain
+  # Verify dependencies before proceeding
+  if ! dependency_check; then
+    log_error "Failed dependency check"
+    exit 1
+  fi
+  
+  # Remove any existing LaunchDaemons
   remove_existing_launchdaemon
   
-  exit 0
+  # Initialize the environment for the scheduled run
+  init_plist
+  
+  # Get current console user info for UI display
+  local console_user
+  console_user=$(who | grep "console" | awk '{print $1}')
+  [ -z "$console_user" ] && console_user=$(stat -f%Su /dev/console)
+  local console_uid
+  console_uid=$(id -u "$console_user")
+  
+  # Set environment variables for UI
+  export DISPLAY=:0
+  launchctl asuser "$console_uid" sudo -u "$console_user" defaults write org.swift.SwiftDialog FrontmostApplication -bool true
+  
+  # Set dialog configuration for scheduled runs
+  PREINSTALL_MESSAGE="Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds, or click Continue to begin now."
+  DIALOG_POSITION="center"
+  DIALOG_ICON="SF=gearshape.circle.fill"
+  
+  # Run dialog as user with proper environment
+  log_info "Displaying scheduled installation dialog"
+  sudo -u "$console_user" bash -c "
+    export DISPLAY=:0
+    export PATH='/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+    '$DIALOG_BIN' --title '$PREINSTALL_TITLE' \
+      --message '$PREINSTALL_MESSAGE' \
+      --button1text '$PREINSTALL_CONTINUE_TEXT' \
+      --icon '$DIALOG_ICON' \
+      --height 200 \
+      --width 500 \
+      --moveable \
+      --ontop \
+      --forefront \
+      --position center \
+      --messagefont 'size=14' \
+      --blurscreen \
+      --progress 60 \
+      --progresstext 'Installation will begin in 60 seconds...' \
+      --timer 60 \
+      --bannerimage '/System/Library/PreferencePanes/SoftwareUpdate.prefPane/Contents/Resources/SoftwareUpdate.icns' \
+      --bannertitle 'Scheduled macOS Upgrade'"
+
+  sleep 2  # Brief pause to ensure dialog is displayed
+
+  # Run the actual installation
+  log_info "Starting installation process"
+  run_erase_install
+  
+  # Explicitly call cleanup to ensure proper exit
+  cleanup_and_exit
 fi
 
 init_logging
