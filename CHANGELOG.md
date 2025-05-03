@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2025-05-02
+### Added
+- Snooze functionality for short-term deferrals (1-4 hours)
+- "Install at next login" scheduling option
+- Comprehensive system diagnostics reporting
+- Enhanced progress indication during caching phase
+
+### Improved
+- Session management for dialog display across all user contexts
+- Privilege separation for core processes
+- Script signature verification during runtime
+- Visual feedback for approaching scheduled times
+- More robust multi-user environment handling
+
+### Fixed
+- Dialog appearance issues in certain user session contexts
+- Race conditions during LaunchDaemon management
+- Improved handling of non-standard LaunchDaemon unloading cases
+- Enhanced error recovery during scheduled installations
+
+---
+
 ## [1.4.19] - 2025-05-01
 ### Changed
 - Switched from system LaunchDaemon to user LaunchAgent for scheduled installations
