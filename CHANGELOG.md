@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1] - 2025-05-03
+### Added
+- Directory-based locking mechanism for improved process management
+- Detailed lock debugging and status reporting
+- Comprehensive stale lock detection and recovery
+
+### Changed
+- Replaced file-based locking with more atomic directory-based approach
+- Improved lock timeout handling with descriptive error messages
+- Enhanced process isolation through robust locking
+
+### Removed
+- Eliminated flock command dependency for better cross-platform compatibility
+- Removed conditional code paths in locking mechanism for simpler maintenance
+
+### Fixed
+- Fixed race condition in lock acquisition process
+- Fixed potential deadlocks when multiple instances try to run simultaneously
+- Improved cleanup of lock artifacts during process termination
+- Enhanced error handling during force-break of stale locks
+
+---
+
 ## [1.5.0] - 2025-05-02
 ### Added
 - Snooze functionality for short-term deferrals (1-4 hours)

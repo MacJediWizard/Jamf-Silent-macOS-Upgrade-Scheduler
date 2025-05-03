@@ -31,6 +31,11 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.5.1 - Implemented robust directory-based locking mechanism
+#         - Removed flock dependency for improved cross-platform compatibility
+#         - Enhanced lock acquisition and release with better error handling
+#         - Fixed race conditions in lock management
+#         - Improved stale lock detection and recovery
 # v1.5.0 - Added snooze functionality and login-time installation scheduling
 #         - Implemented comprehensive system diagnostics reporting
 #         - Enhanced session management for dialog display in all contexts
@@ -66,6 +71,19 @@
 # v1.4.0 - Persistent deferral count across runs and reset when new script version is detected
 #
 ########################################################################################################################################################################
+
+# ---------- Immediate Boot Cleanup ----------
+# Clean up any lingering locks from a prior execution
+if [ -f "/tmp/erase-install-wrapper-main.lock" ]; then
+  rm -f "/tmp/erase-install-wrapper-main.lock" 2>/dev/null
+fi
+if [ -f "/var/run/erase-install-wrapper.lock" ]; then
+  rm -f "/var/run/erase-install-wrapper.lock" 2>/dev/null
+fi
+# Close any potentially open file descriptors
+for fd in {200..210}; do
+  eval "exec $fd>&-" 2>/dev/null
+done
 
 # ---------------- Configuration ----------------
 
@@ -205,6 +223,122 @@ log_system_info() {
   log_system "Log File Location: ${WRAPPER_LOG}"
 }
 
+# ---------------- Locking Functions ----------------
+
+# Function to acquire a lock with improved atomicity
+# Function to acquire a lock with improved atomicity
+acquire_lock() {
+  local lock_path="$1"
+  local lock_timeout="${2:-60}"  # Default timeout of 60 seconds
+  local force_break="${3:-false}" # Parameter to force break locks
+  
+  local start_time=$(date +%s)
+  local end_time=$((start_time + lock_timeout))
+  local current_time
+  
+  # Create lock directory if it doesn't exist
+  mkdir -p "$(dirname "$lock_path")" 2>/dev/null
+  
+  log_debug "Attempting to acquire lock: $lock_path (timeout: ${lock_timeout}s, force_break: ${force_break})"
+  
+  # If force break is enabled, just remove any existing locks
+  if [ "$force_break" = "true" ]; then
+    log_warn "Force-break enabled. Removing lock file and directory if they exist."
+    # Close any open file descriptors first
+    for fd in {200..210}; do
+      eval "exec $fd>&-" 2>/dev/null
+    done
+    log_debug "Closed potential file descriptors"
+    
+    # Remove both lock file and lock directory
+    rm -f "$lock_path" 2>/dev/null
+    rm -rf "$lock_path.dir" 2>/dev/null
+    sleep 1
+  fi
+  
+  # Try to acquire lock using mkdir (more atomic than file creation)
+  while true; do
+    current_time=$(date +%s)
+    
+    # Check for timeout
+    if [ $current_time -ge $end_time ]; then
+      log_error "Failed to acquire lock after ${lock_timeout} seconds: $lock_path"
+      return 1
+    fi
+    
+    # Use mkdir for atomic lock acquisition - safer than file creation
+    if mkdir "$lock_path.dir" 2>/dev/null; then
+      # We got the lock, create a PID file for debugging
+      echo "$(date +'%Y-%m-%d %H:%M:%S') $$" > "$lock_path"
+      log_debug "Lock acquired using directory method: $lock_path"
+      return 0
+    else
+      # Check if the lock is stale
+      if [ -d "$lock_path.dir" ] && [ -f "$lock_path" ]; then
+        # Read the PID from the lock file
+        local lock_data=$(cat "$lock_path" 2>/dev/null)
+        if [ -n "$lock_data" ]; then
+          local lock_timestamp=$(echo "$lock_data" | awk '{print $1" "$2}')
+          local lock_pid=$(echo "$lock_data" | awk '{print $3}')
+          
+          # Convert timestamp to seconds since epoch
+          local lock_time=$(date -j -f "%Y-%m-%d %H:%M:%S" "$lock_timestamp" "+%s" 2>/dev/null)
+          
+          # If the PID doesn't exist, or the lock is older than 10 minutes, break it
+          if ! kill -0 "$lock_pid" 2>/dev/null || [ $((current_time - lock_time)) -gt 600 ]; then
+            log_warn "Found stale lock (PID: $lock_pid not running or lock too old). Breaking."
+            rm -f "$lock_path" 2>/dev/null
+            rm -rf "$lock_path.dir" 2>/dev/null
+          fi
+        else
+          # Lock file exists but is empty or unreadable - consider it stale
+          log_warn "Found potentially corrupt lock file. Breaking."
+          rm -f "$lock_path" 2>/dev/null
+          rm -rf "$lock_path.dir" 2>/dev/null
+        fi
+      fi
+    fi
+    
+    # Sleep briefly before trying again
+    sleep 1
+  done
+}
+
+# Function to release a lock
+release_lock() {
+  local lock_path="${LOCK_FILE}"
+  
+  log_debug "Releasing lock: $lock_path"
+  
+  # Clean up both lock file and directory
+  rm -f "$lock_path" 2>/dev/null
+  rm -rf "$lock_path.dir" 2>/dev/null
+  
+  # Close any open file descriptors for good measure
+  for fd in {200..210}; do
+    eval "exec $fd>&-" 2>/dev/null
+  done
+  
+  return 0
+}
+
+# Function to clean up any locks at startup
+clean_all_locks() {
+  log_info "Cleaning up all potential lock files"
+  
+  # Clean up lock files
+  rm -f "/tmp/erase-install-wrapper-main.lock" 2>/dev/null
+  rm -rf "/tmp/erase-install-wrapper-main.lock.dir" 2>/dev/null
+  rm -f "/var/run/erase-install-wrapper.lock" 2>/dev/null
+  rm -rf "/var/run/erase-install-wrapper.lock.dir" 2>/dev/null
+  
+  # Close any potentially open file descriptors
+  for fd in {200..210}; do
+    eval "exec $fd>&-" 2>/dev/null
+  done
+  
+  log_debug "Lock cleanup completed"
+}
 
 # ---------------- JSON Output Parsing ----------------
 
@@ -1214,6 +1348,45 @@ verify_complete_system_cleanup() {
   log_info "Comprehensive verification cleanup complete"
 }
 
+# Function to identify and terminate lingering watchdog processes
+kill_lingering_watchdogs() {
+  log_info "Checking for lingering watchdog processes..."
+  
+  # Find all watchdog processes
+  local watchdog_pids=$(ps -ef | grep -E '/bin/bash.*/Library/Management/erase-install/erase-install-watchdog-.*.sh' | grep -v grep | awk '{print $2}')
+  
+  if [ -n "$watchdog_pids" ]; then
+    log_info "Found lingering watchdog processes: $watchdog_pids"
+    
+    # Kill each process
+    for pid in $watchdog_pids; do
+      log_info "Terminating watchdog process: $pid"
+      kill -15 $pid 2>/dev/null
+      sleep 0.2
+    done
+    
+    # Wait a moment and check if they're gone
+    sleep 1
+    
+    # Find any remaining processes and force kill
+    watchdog_pids=$(ps -ef | grep -E '/bin/bash.*/Library/Management/erase-install/erase-install-watchdog-.*.sh' | grep -v grep | awk '{print $2}')
+    if [ -n "$watchdog_pids" ]; then
+      log_info "Some watchdog processes remain after SIGTERM. Force killing: $watchdog_pids"
+      for pid in $watchdog_pids; do
+        kill -9 $pid 2>/dev/null
+      done
+    fi
+  else
+    log_debug "No lingering watchdog processes found."
+  fi
+  
+  # Remove any leftover watchdog scripts
+  if [ -n "$(ls /Library/Management/erase-install/erase-install-watchdog-*.sh 2>/dev/null)" ]; then
+    log_info "Removing orphaned watchdog scripts..."
+    rm -f /Library/Management/erase-install/erase-install-watchdog-*.sh 2>/dev/null
+  fi
+}
+
 # ---------------- Installer ----------------
 
 run_erase_install() {
@@ -1668,6 +1841,40 @@ show_prompt() {
 
 # ---------------- Main ----------------
 
+# First, check for cleanup command option
+if [[ "$1" == "--cleanup" ]]; then
+  # Initialize logging first
+  init_logging
+  log_info "Running emergency cleanup of all watchdog processes and locks"
+  
+  # Kill all watchdog processes
+  log_info "Finding and terminating all watchdog processes..."
+  for pid in $(ps -ef | grep -E '/bin/bash.*/Library/Management/erase-install/erase-install-watchdog-.*.sh' | grep -v grep | awk '{print $2}'); do
+    log_info "Killing watchdog process: $pid"
+    kill -9 $pid 2>/dev/null
+    sleep 0.1
+  done
+  
+  # Remove all lock files
+  log_info "Removing lock files..."
+  rm -f /tmp/erase-install-wrapper-main.lock 2>/dev/null
+  rm -f /var/run/erase-install-wrapper.lock 2>/dev/null
+  
+  # Clean up any potentially open file descriptors
+  clean_lock_fds
+  
+  # Remove all watchdog scripts
+  log_info "Removing watchdog scripts..."
+  rm -f /Library/Management/erase-install/erase-install-watchdog-*.sh 2>/dev/null
+  
+  # Clean up any remaining LaunchDaemons
+  log_info "Cleaning up LaunchDaemons..."
+  emergency_daemon_cleanup
+  
+  log_info "Emergency cleanup completed"
+  exit 0
+fi
+
 if [[ "$1" == "--scheduled" ]]; then
   # Initialize logging first
   init_logging
@@ -1677,6 +1884,10 @@ if [[ "$1" == "--scheduled" ]]; then
   cleanup_and_exit() {
     local exit_code=$?
     log_info "Cleaning up scheduled installation process"
+    
+    # Kill any lingering watchdog processes
+    kill_lingering_watchdogs
+    
     # Try to remove LaunchDaemon multiple times if needed
     local retries=3
     while [ $retries -gt 0 ]; do
@@ -1686,17 +1897,33 @@ if [[ "$1" == "--scheduled" ]]; then
       retries=$((retries - 1))
       [ $retries -gt 0 ] && sleep 1
     done
-    if [ -n "$LOCK_FILE" ]; then
-      rm -rf "$LOCK_FILE" "$LOCK_TIMESTAMP"
-    fi
+    
     log_info "Scheduled installation process completed (exit code: $exit_code)"
     exit $exit_code
   }
   
+  if [[ "$1" == "--clean-locks" ]]; then
+    init_logging
+    log_info "Manual lock cleanup requested"
+    
+    # Clean up lock files
+    for lock_file in "/tmp/erase-install-wrapper-main.lock" "/var/run/erase-install-wrapper.lock"; do
+      if [ -f "$lock_file" ]; then
+        log_info "Removing lock file: $lock_file"
+        rm -f "$lock_file"
+      else
+        log_info "No lock file found at: $lock_file"
+      fi
+    done
+    
+    log_info "Lock cleanup completed"
+    exit 0
+  fi
+  
   # Set up trap immediately
   trap 'cleanup_and_exit' EXIT TERM INT
   
-  # Create a timestamped lock file for better tracking
+  # Set up locking
   if [[ $EUID -eq 0 ]]; then
     # Running as root
     LOCK_DIR="/var/run"
@@ -1705,29 +1932,24 @@ if [[ "$1" == "--scheduled" ]]; then
     LOCK_DIR="/tmp"
   fi
   LOCK_FILE="${LOCK_DIR}/erase-install-wrapper.lock"
-  LOCK_TIMESTAMP="${LOCK_DIR}/erase-install-wrapper.timestamp"
   
-  # Check if another instance is already running
-  if ! mkdir "$LOCK_FILE" 2>/dev/null; then
-    if [ -f "$LOCK_TIMESTAMP" ]; then
-      LOCK_AGE=$(($(date +%s) - $(cat "$LOCK_TIMESTAMP")))
-      if [ $LOCK_AGE -gt 300 ]; then  # 5 minutes
-        log_warn "Removing stale lock file (age: ${LOCK_AGE}s)"
-        rm -rf "$LOCK_FILE" "$LOCK_TIMESTAMP"
-        mkdir "$LOCK_FILE"
-      else
-        log_error "Another instance is running (started ${LOCK_AGE}s ago). Exiting."
-        exit 1
-      fi
+  # Kill any lingering watchdog processes first
+  kill_lingering_watchdogs
+  
+  # Try to acquire lock with a 60-second timeout
+  if ! acquire_lock "$LOCK_FILE" 30 false; then
+    log_warn "Unable to acquire lock normally. Checking for stale locks..."
+    
+    if ! acquire_lock "$LOCK_FILE" 5 true; then
+      log_error "Still unable to acquire lock. Another instance may be running. Exiting."
+      exit 1
     else
-      log_error "Lock file exists but no timestamp found. Cleaning up."
-      rm -rf "$LOCK_FILE"
-      mkdir "$LOCK_FILE"
+      log_warn "Lock acquired after force-break."
     fi
   fi
   
-  # Record start time
-  date +%s > "$LOCK_TIMESTAMP"
+  # Set up trap to release lock on exit
+  trap 'release_lock; cleanup_and_exit' EXIT TERM INT  
   
   # Ensure cleanup on exit - trap is already set up above
   
@@ -1881,10 +2103,32 @@ log_system_info
 # Add emergency cleanup first thing
 emergency_daemon_cleanup
 
+# Kill any lingering watchdog processes
+kill_lingering_watchdogs
+
+# Set up locking for main script execution
+LOCK_FILE="/tmp/erase-install-wrapper-main.lock"
+
+# First try to acquire lock normally
+if ! acquire_lock "$LOCK_FILE" 15 false; then
+  log_warn "Unable to acquire lock normally. Attempting one more time with force-break..."
+  
+  # Try again with force-break
+  if ! acquire_lock "$LOCK_FILE" 5 true; then
+    log_error "Still unable to acquire lock after force-break attempt. Exiting."
+    exit 1
+  else
+    log_warn "Lock acquired after force-break."
+  fi
+fi
+
+# Set up trap to release lock on exit
+trap 'release_lock' EXIT TERM INT
+
 # Check for dependencies
 if ! dependency_check; then
   log_error "Required dependencies are missing. Exiting."
-  return 1
+  exit 1
 fi
 
 # Initialize plist for deferral tracking
@@ -1899,7 +2143,7 @@ set_options
 # Show prompt and handle user selection
 if ! show_prompt; then
   log_error "User prompt failed or was dismissed. Exiting."
-  return 1
+  exit 1
 fi
 
 # Call this function at the very end of your main script
