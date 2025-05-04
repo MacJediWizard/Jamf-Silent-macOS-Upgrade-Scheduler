@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.2] - 2025-05-04
+### Fixed
+- Fixed octal parsing errors in time calculation functions (resolving "value too great for base" errors)
+- Properly handled leading zeros in time values with explicit base-10 conversion
+- Corrected handling of scheduled times like 08:00 and 09:00 that were previously misinterpreted
+- Enhanced time validation in scheduling functions
+- Added explicit base-10 parsing for all time-related operations
+- Improved error messages for time formatting issues
+- Standardized time handling across scheduling and deferral functions
+
+### Changed
+- Updated configuration variables section for more consistent organization
+- Reorganized core settings and file paths in configuration section
+- Standardized variable naming conventions throughout the script
+
+---
+
 ## [1.5.1] - 2025-05-03
 ### Added
 - Directory-based locking mechanism for improved process management

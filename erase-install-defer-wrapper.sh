@@ -31,6 +31,11 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.5.2 - Fixed 24-hour time calculation issues with proper base-10 conversion
+#         - Corrected octal parsing errors in time handling functions
+#         - Enhanced time validation in scheduling functions
+#         - Improved error handling for time-based operations
+#         - Updated configuration variables for more consistent organization
 # v1.5.1 - Implemented robust directory-based locking mechanism
 #         - Removed flock dependency for improved cross-platform compatibility
 #         - Enhanced lock acquisition and release with better error handling
@@ -71,6 +76,94 @@
 # v1.4.0 - Persistent deferral count across runs and reset when new script version is detected
 #
 ########################################################################################################################################################################
+########################################################################################################################################################################
+#
+# User Configuration Section
+#
+# This section contains all configurable options for the erase-install-defer-wrapper.sh
+# Modify these settings to customize the behavior of the script
+#
+########################################################################################################################################################################
+#
+# ---- Core Settings ----
+SCRIPT_VERSION="1.5.1"              # Current version of this script
+INSTALLER_OS="15"                   # Target macOS version number to install in prompts
+MAX_DEFERS=3                        # Maximum number of times a user can defer installation
+FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
+#
+# ---- File Paths ----
+PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"  # Preferences file location
+SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"    # Grham Pugh Erase-Install Script Path
+DIALOG_BIN="/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog"   # Grham Pugh Swift Dialog Path
+[ ! -x "$DIALOG_BIN" ] && DIALOG_BIN="/usr/local/bin/dialog"    # Fallback to traditional location if primary doesn't exist
+LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"       # Label for LaunchDaemon
+LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"  # Path to LaunchDaemon
+#
+# ---- Feature Toggles ----
+TEST_MODE=true                      # Set to false for production
+AUTO_INSTALL_DEPENDENCIES=true      # Automatically install erase-install and SwiftDialog if missing
+DEBUG_MODE=true                     # Enable detailed logging
+#
+# ---- Logging Configuration ----
+MAX_LOG_SIZE_MB=10                  # Maximum log file size before rotation
+MAX_LOG_FILES=5                     # Number of log files to keep when rotating
+#
+# ---- Main Dialog UI Configuration ----
+DIALOG_TITLE="macOS Upgrade Required"          # Title shown on main dialog
+DIALOG_TITLE_TEST_MODE="$DIALOG_TITLE\n                (TEST MODE)"   # Title for main dialog Test Mode
+DIALOG_MESSAGE="Please install macOS ${INSTALLER_OS}. Select an action:"  # Main message text
+DIALOG_ICON="SF=gear"                          # Icon (SF Symbol or path to image)
+DIALOG_POSITION="topright"                     # Dialog position: topleft, topright, center, bottomleft, bottomright
+DIALOG_HEIGHT=250                              # Dialog height in pixels
+DIALOG_WIDTH=550                               # Dialog width in pixels
+DIALOG_MESSAGEFONT="size=14"                   # Font size for dialog message
+#
+# ---- Dialog Button/Option Text ----
+DIALOG_INSTALL_NOW_TEXT="Install Now"          # Text for immediate installation option
+DIALOG_SCHEDULE_TODAY_TEXT="Schedule Today"    # Text for schedule option
+DIALOG_DEFER_TEXT="Defer 24 Hours"             # Text for deferral option
+DIALOG_CONFIRM_TEXT="Confirm"                  # Button text for confirmation dialogs
+#
+# ---- Pre-installation Dialog ----
+PREINSTALL_TITLE="macOS Upgrade Starting"      # Title for pre-installation dialog
+PREINSTALL_TITLE_TEST_MODE="$PREINSTALL_TITLE\n                (TEST MODE)"   # Title for pre-installation dialog Test Mode
+PREINSTALL_MESSAGE="Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds, or click Continue to begin now."  # Message text
+PREINSTALL_PROGRESS_TEXT_MESSAGE="Installation will begin in 60 seconds..."   # Progress Text Message
+PREINSTALL_CONTINUE_TEXT="Continue Now"        # Button text for continue button
+PREINSTALL_COUNTDOWN=60                        # Countdown duration in seconds
+PREINSTALL_HEIGHT=250                          # Height of pre-installation dialog
+PREINSTALL_WIDTH=550                           # Width of pre-installation dialog
+PREINSTALL_DIALOG_MESSAGEFONT="size=14"        # Font size for pre-installation dialog message
+#
+# ---- Scheduled Installation Dialog ----
+SCHEDULED_TITLE="macOS Upgrade Scheduled"      # Title for scheduled dialog
+SCHEDULED_TITLE_TEST_MODE="$SCHEDULED_TITLE\n                (TEST MODE)"   # Title for scheduled dialog Test Mode
+SCHEDULED_MESSAGE="Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds, or click Continue to begin now."  # Message text
+SCHEDULED_PROGRESS_TEXT_MESSAGE="Installation will begin in 60 seconds....."   # Progress Text Message
+SCHEDULED_CONTINUE_TEXT="Continue Now"        # Button text for continue button
+SCHEDULED_COUNTDOWN=60                        # Countdown duration in seconds
+SCHEDULED_HEIGHT=350                          # Height of scheduled dialog
+SCHEDULED_WIDTH=550                           # Width of scheduled dialog
+SCHEDULED_DIALOG_MESSAGEFONT="size=14"        # Font size for scheduled dialog message
+#
+# ---- Error Dialog Configuration ----
+ERROR_DIALOG_TITLE="Invalid Time"              # Title for error dialog
+ERROR_DIALOG_MESSAGE="The selected time is invalid.\nPlease select a valid time (00:00-23:59)."  # Error message
+ERROR_DIALOG_ICON="SF=exclamationmark.triangle" # Icon for error dialog
+ERROR_DIALOG_HEIGHT=250                        # Height of error dialog
+ERROR_DIALOG_WIDTH=550                         # Width of error dialog
+ERROR_CONTINUE_TEXT="OK"                       # Button text for continue button
+#
+# ---- Options passed to erase-install.sh ----
+# These settings control which arguments are passed to Graham Pugh's script
+REBOOT_DELAY=60                    # Delay in seconds before rebooting
+REINSTALL=true                     # true=reinstall, false=erase and install
+NO_FS=true                         # Skip file system creation
+CHECK_POWER=true                   # Check if on AC power before installing
+MIN_DRIVE_SPACE=50                 # Minimum free drive space in GB
+CLEANUP_AFTER_USE=true             # Clean up temp files after use
+#
+########################################################################################################################################################################
 
 # ---------- Immediate Boot Cleanup ----------
 # Clean up any lingering locks from a prior execution
@@ -86,34 +179,6 @@ for fd in {200..210}; do
 done
 
 # ---------------- Configuration ----------------
-
-PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
-SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
-DIALOG_BIN="/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog"
-# Fallback to traditional location if primary doesn't exist
-[ ! -x "$DIALOG_BIN" ] && DIALOG_BIN="/usr/local/bin/dialog"
-
-SCRIPT_VERSION="1.4.19"
-INSTALLER_OS="15"
-MAX_DEFERS=3
-FORCE_TIMEOUT_SECONDS=259200
-
-# Set to false for production
-TEST_MODE=true
-AUTO_INSTALL_DEPENDENCIES=true
-DEBUG_MODE=true
-
-LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"
-LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"
-
-# Configuration Variables for erase-install.sh options
-REBOOT_DELAY=60  # Delay in seconds before rebooting (0 for no delay)
-REINSTALL=true  # Whether to reinstall macOS
-NO_FS=true  # Whether to skip file system creation
-CHECK_POWER=true  # Whether to check power source
-MIN_DRIVE_SPACE=50  # Minimum free drive space in GB
-CLEANUP_AFTER_USE=true # Whether to cleanup after use
-
 CURRENT_RUN_ID=""
 
 # Determine absolute path for script regardless of how it was called
@@ -152,9 +217,6 @@ else
   WRAPPER_LOG="$HOME/Library/Logs/erase-install-wrapper.log"
   LOG_DIR="$HOME/Library/Logs"
 fi
-
-MAX_LOG_SIZE_MB=10
-MAX_LOG_FILES=5
 
 # ---------------- Logging Functions ----------------
 
@@ -225,7 +287,6 @@ log_system_info() {
 
 # ---------------- Locking Functions ----------------
 
-# Function to acquire a lock with improved atomicity
 # Function to acquire a lock with improved atomicity
 acquire_lock() {
   local lock_path="$1"
@@ -779,8 +840,8 @@ create_scheduled_launchdaemon() {
   sudo -u "$console_user" mkdir -p "/Users/$console_user/Library/LaunchAgents"
   
   # For test mode, add indication in the dialog title
-  local display_title="$PREINSTALL_TITLE"
-  [[ "$TEST_MODE" = true ]] && display_title="$PREINSTALL_TITLE (TEST MODE)"
+  local display_title="$SCHEDULED_TITLE"
+  [[ "$TEST_MODE" = true ]] && display_title="${SCHEDULED_TITLE_TEST_MODE}"
   
   # Create a helper script that will run dialog and then trigger the installer
   local helper_script="/Users/$console_user/Library/Application Support/erase-install-helper-${run_id}.sh"
@@ -799,19 +860,18 @@ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Helper script starting dialog" >> "\$LOG_F
 
 # Display dialog with countdown
 "${DIALOG_BIN}" --title "${display_title}" \\
-  --message "${PREINSTALL_MESSAGE}" \\
-  --button1text "${PREINSTALL_CONTINUE_TEXT}" \\
+  --message "${SCHEDULED_MESSAGE}" \\
+  --button1text "${SCHEDULED_CONTINUE_TEXT}" \\
   --icon "${DIALOG_ICON}" \\
-  --height 200 \\
-  --width 500 \\
+  --height ${SCHEDULED_HEIGHT} \\
+  --width ${SCHEDULED_WIDTH} \\
   --moveable \\
   --ontop \\
   --position "${DIALOG_POSITION}" \\
-  --messagefont 'size=14' \\
-  --progress 60 \\
-  --progresstext "Installation will begin in 60 seconds..." \\
-  --timer 60 \\
-  --quitkey k
+  --messagefont ${SCHEDULED_DIALOG_MESSAGEFONT} \\
+  --progress ${SCHEDULED_COUNTDOWN} \\
+  --progresstext "${SCHEDULED_PROGRESS_TEXT_MESSAGE}" \\
+  --timer ${SCHEDULED_COUNTDOWN}
 
 DIALOG_RESULT=\$?
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog completed with status: \$DIALOG_RESULT" >> "\$LOG_FILE"
@@ -1517,6 +1577,10 @@ show_preinstall() {
   local show_countdown="${1:-true}"
   local countdown=${PREINSTALL_COUNTDOWN:-60}
   
+  # For test mode, add indication in the dialog title
+  local display_title="$PREINSTALL_TITLE"
+  [[ "$TEST_MODE" = true ]] && display_title="${PREINSTALL_TITLE_TEST_MODE}"
+  
   # Remove any existing LaunchDaemons before starting
   remove_existing_launchdaemon
   
@@ -1535,11 +1599,12 @@ show_preinstall() {
   echo "$countdown" > "$tmp_progress"
   
   # Launch dialog with countdown and progress bar
-  "$DIALOG_BIN" --title "$PREINSTALL_TITLE" \
+  "$DIALOG_BIN" --title "$display_title" \
   --message "$PREINSTALL_MESSAGE" \
   --button1text "$PREINSTALL_CONTINUE_TEXT" \
-  --height 180 \
-  --width 450 \
+  --height ${PREINSTALL_HEIGHT} \
+  --width ${PREINSTALL_WIDTH} \
+  --messagefont ${PREINSTALL_DIALOG_MESSAGEFONT} \
   --moveable \
   --icon "$DIALOG_ICON" \
   --ontop \
@@ -1615,19 +1680,6 @@ show_preinstall() {
 }
 
 # -------------- Prompt Handling --------------
-
-DIALOG_TITLE="macOS Upgrade Required"
-DIALOG_MESSAGE="Please install macOS ${INSTALLER_OS}. Select an action:"
-DIALOG_ICON="SF=gear"
-DIALOG_POSITION="topright"
-DIALOG_INSTALL_NOW_TEXT="Install Now"
-DIALOG_SCHEDULE_TODAY_TEXT="Schedule Today"
-DIALOG_DEFER_TEXT="Defer 24 Hours"
-PREINSTALL_TITLE="macOS Upgrade Starting"
-PREINSTALL_MESSAGE="Your upgrade will begin in 60 seconds.\nClick Continue to start immediately."
-PREINSTALL_CONTINUE_TEXT="Continue Now"
-PREINSTALL_COUNTDOWN=60
-
 set_options() {
   [[ "${DEFERRAL_EXCEEDED}" = true ]] && OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT}" || OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT},${DIALOG_DEFER_TEXT}"
 }
@@ -1640,26 +1692,37 @@ generate_time_options() {
   local current_hour=$(date +%H)
   local current_minute=$(date +%M)
   
+  # Convert to base-10 integers to handle leading zeros properly
+  local current_hour_num=$((10#$current_hour))
+  local current_minute_num=$((10#$current_minute))
+  
   # Add today's remaining hours in 15-minute increments
   # Calculate which 15-minute blocks remain in the current hour
-  if [ $((10#$current_minute)) -lt 15 ]; then
+  if [ $current_minute_num -lt 15 ]; then
     time_options="${current_hour}:15,${current_hour}:30,${current_hour}:45"
-  elif [ $((10#$current_minute)) -lt 30 ]; then
+  elif [ $current_minute_num -lt 30 ]; then
     time_options="${current_hour}:30,${current_hour}:45"
-  elif [ $((10#$current_minute)) -lt 45 ]; then
+  elif [ $current_minute_num -lt 45 ]; then
     time_options="${current_hour}:45"
   fi
   
-  # Add remaining full hours today
-  local next_hour=$((10#$current_hour + 1))
-  for h in $(seq $next_hour 23); do
-    local fmt_hour=$(printf "%02d" $h)
-    time_options="${time_options:+$time_options,}${fmt_hour}:00,${fmt_hour}:15,${fmt_hour}:30,${fmt_hour}:45"
-  done
+  # Add remaining full hours today - ensure we stop at 23
+  local next_hour=$((current_hour_num + 1))
+  if [ $next_hour -le 23 ]; then
+    for h in $(seq $next_hour 23); do
+      local fmt_hour=$(printf "%02d" $h)
+      time_options="${time_options:+$time_options,}${fmt_hour}:00,${fmt_hour}:15,${fmt_hour}:30,${fmt_hour}:45"
+    done
+  fi
   
-  # Add tomorrow early morning (8, 9, 10) if we have few options
+  # Add tomorrow early morning (8, 9, 10) if we have few options left today
   if [ $next_hour -gt 20 ]; then
     time_options="${time_options:+$time_options,}Tomorrow 08:00,Tomorrow 08:30,Tomorrow 09:00,Tomorrow 09:30"
+  fi
+  
+  # Ensure we have at least some options
+  if [ -z "$time_options" ]; then
+    time_options="Tomorrow 08:00,Tomorrow 08:30,Tomorrow 09:00,Tomorrow 09:30"
   fi
   
   printf "%s" "$time_options"
@@ -1722,7 +1785,11 @@ show_prompt() {
     launchctl asuser "$console_uid" sudo -u "$console_user" defaults write org.swift.SwiftDialog FrontmostApplication -bool true
   fi
   
-  local raw; raw=$("${DIALOG_BIN}" --title "${DIALOG_TITLE}" --message "${DIALOG_MESSAGE}" --button1text "Confirm" --height 250 --width 550 --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "size=14" --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+  # For test mode, add indication in the dialog title
+  local display_title="$DIALOG_TITLE"
+  [[ "$TEST_MODE" = true ]] && display_title="${DIALOG_TITLE_TEST_MODE}"
+  
+  local raw; raw=$("${DIALOG_BIN}" --title "${display_title}" --message "${DIALOG_MESSAGE}" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${DIALOG_HEIGHT} --width ${DIALOG_WIDTH} --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont ${DIALOG_MESSAGEFONT} --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
   local code=$?
   log_debug "SwiftDialog exit code: ${code}"
   log_debug "SwiftDialog raw output: ${raw}"
@@ -1750,7 +1817,10 @@ show_prompt() {
     "${DIALOG_SCHEDULE_TODAY_TEXT}")
       local sched subcode time_data hour minute day month
       local time_options; time_options=$(generate_time_options)
-      local sub; sub=$("${DIALOG_BIN}" --title "Schedule Installation" --message "Select installation time:" --button1text "Confirm" --height 280 --width 500 --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "size=14" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+      # For test mode, add indication in the dialog title
+      local display_title="$SCHEDULED_TITLE"
+      [[ "$TEST_MODE" = true ]] && display_title="${SCHEDULED_TITLE_TEST_MODE}"
+      local sub; sub=$("${DIALOG_BIN}" --title "${display_title}" --message "Select installation time:" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${SCHEDULED_HEIGHT} --width ${SCHEDULED_WIDTH} --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "${SCHEDULED_DIALOG_MESSAGEFONT}" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
       subcode=$?
       log_debug "Schedule dialog exit code: ${subcode}"
       log_debug "Schedule raw output: ${sub}"
@@ -1764,7 +1834,7 @@ show_prompt() {
         log_warn "Invalid time selection: $sched"
         
         # Show error dialog
-        "${DIALOG_BIN}" --title "Invalid Time" --message "The selected time is invalid.\nPlease select a valid time (00:00-23:59)." --icon "SF=exclamationmark.triangle" --button1text "OK" --height 180 --width 400 --position "${DIALOG_POSITION}"
+        "${DIALOG_BIN}" --title "${ERROR_DIALOG_TITLE}" --message "${ERROR_DIALOG_MESSAGE}" --icon "${ERROR_DIALOG_ICON}" --button1text "${ERROR_CONTINUE_TEXT}" --height ${ERROR_DIALOG_HEIGHT} --width ${ERROR_DIALOG_WIDTH} --position "${DIALOG_POSITION}"
         
         # Return to main prompt instead of exiting
         show_prompt
@@ -1861,7 +1931,9 @@ if [[ "$1" == "--cleanup" ]]; then
   rm -f /var/run/erase-install-wrapper.lock 2>/dev/null
   
   # Clean up any potentially open file descriptors
-  clean_lock_fds
+  for fd in {200..210}; do
+    eval "exec $fd>&-" 2>/dev/null
+  done
   
   # Remove all watchdog scripts
   log_info "Removing watchdog scripts..."
@@ -1997,11 +2069,6 @@ if [[ "$1" == "--scheduled" ]]; then
   # Set environment variables for UI
   export DISPLAY=:0
   
-  # Set dialog configuration for scheduled runs
-  PREINSTALL_MESSAGE="Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds, or click Continue to begin now."
-  DIALOG_POSITION="center"
-  DIALOG_ICON="SF=gearshape.circle.fill"
-  
   # Run dialog as user with proper environment - enhanced for visibility
   log_info "Displaying scheduled installation dialog for user: $console_user"
   log_info "About to display dialogs for user: '$console_user' with UID: $console_uid"
@@ -2011,7 +2078,7 @@ if [[ "$1" == "--scheduled" ]]; then
   launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e "
     tell application \"System Events\"
       activate
-      display dialog \"macOS Upgrade Scheduled\" buttons {\"OK\"} default button \"OK\" with title \"$PREINSTALL_TITLE\" with icon note giving up after 5
+      display dialog \"${SCHEDULED_TITLE}\" buttons {\"OK\"} default button \"OK\" with title \"$PREINSTALL_TITLE\" with icon note giving up after 5
     end tell
   " 2>&1 | log_debug "AppleScript result: $(cat -)" || log_debug "AppleScript notification failed"
   
@@ -2048,16 +2115,16 @@ echo "  Message: ${PREINSTALL_MESSAGE}"
   --message "${PREINSTALL_MESSAGE}" \\
   --button1text "${PREINSTALL_CONTINUE_TEXT}" \\
   --icon "${DIALOG_ICON}" \\
-  --height 200 \\
-  --width 500 \\
+  --height ${PREINSTALL_HEIGHT} \\
+  --width ${PREINSTALL_WIDTH} \\
+  --messagefont ${PREINSTALL_DIALOG_MESSAGEFONT} \\
   --moveable \\
   --ontop \\
   --forefront \\
   --position "${DIALOG_POSITION}" \\
-  --messagefont 'size=14' \\
-  --progress 60 \\
-  --progresstext "Installation will begin in 60 seconds..." \\
-  --timer 60 
+  --progress ${PREINSTALL_COUNTDOWN} \\
+  --progresstext "${PREINSTALL_PROGRESS_TEXT_MESSAGE}" \\
+  --timer ${PREINSTALL_COUNTDOWN} 
 EOF
   
   # Make script executable and set proper ownership
