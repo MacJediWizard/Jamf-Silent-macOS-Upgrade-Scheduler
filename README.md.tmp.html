@@ -1,0 +1,192 @@
+<meta charset="UTF-8">
+<h1>Jamf Silent macOS Upgrade Scheduler</h1>
+
+<p>A silent macOS upgrade orchestration wrapper for <a href="https://github.com/grahampugh/erase-install">Graham Pugh's erase-install</a>, <br />
+designed for enterprise environments using Jamf Pro or other MDMs.</p>
+
+<p>This script silently pre-caches macOS installers and prompts users only at the final decision point, balancing user flexibility with enforced upgrade deadlines. <br />
+Now with <strong>automatic dependency installation</strong>, <strong>test mode features</strong>, <strong>snooze functionality</strong>, <strong>login-time installation</strong>, and <strong>comprehensive diagnostics</strong>.</p>
+
+<hr />
+
+<h2>Features</h2>
+
+<ul>
+<li>🚀 Silent installer download and caching  </li>
+<li>🛡 Minimal user interruption  </li>
+<li>⏳ 24-hour deferral support (up to 3 times)  </li>
+<li>⏰ Snooze option for short-term deferrals (1–4 hours)  </li>
+<li>🧪 Test mode with quick 5-minute deferrals and OS version check bypass</li>
+<li>🔒 Forced upgrade after 72 hours or 3 deferrals  </li>
+<li>📅 Flexible scheduling options (today, tomorrow, or at next login)  </li>
+<li>🔐 Robust directory-based locking mechanism to prevent race conditions  </li>
+<li>🎯 Enhanced UI handling with proper user context display  </li>
+<li>🛠 Full dry-run testing with erase-install's <code>--test-run</code>  </li>
+<li>📦 Auto-installs erase-install and swiftDialog if missing  </li>
+<li>✍️ Configurable dialog text, button labels, and window position  </li>
+<li>🔄 Robust process tracking and cleanup procedures  </li>
+<li>📊 Comprehensive system diagnostics for troubleshooting  </li>
+<li>✅ Enterprise-grade error handling, structured logging (INFO/WARN/ERROR/DEBUG)  </li>
+<li>⚙️ Improved time handling with proper base-10 conversion  </li>
+</ul>
+
+<hr />
+
+<h2>Requirements</h2>
+
+<ul>
+<li>macOS 11 or newer  </li>
+<li><a href="https://github.com/grahampugh/erase-install">erase-install</a> v37.0 or later  </li>
+<li><a href="https://github.com/bartreardon/swiftDialog">swiftDialog</a> installed on client Macs  </li>
+<li>(Optionally: Jamf Pro to manage deployment)  </li>
+</ul>
+
+<hr />
+
+<h2>Jamf Deployment Model</h2>
+
+<p>To provide a smooth upgrade experience with minimal disruption, this tool is designed to work with <strong>two separate Jamf policies</strong>:</p>
+
+<h3>1. Installer Caching Policy</h3>
+
+<p>Run this policy ahead of time to silently download and cache the macOS installer. This ensures that the upgrade can begin immediately when triggered later by the wrapper, without the delay of downloading.</p>
+
+<p><strong>Jamf policy script:</strong></p>
+
+<p><code>bash
+sudo /Library/Management/erase-install/erase-install.sh \
+  --download \
+  --os=15 \
+  --no-fs \
+  --check-power \
+  --min-drive-space=50 \
+  --overwrite \
+  --silent
+</code></p>
+
+<p>This policy should be scheduled to run during business hours or off-peak times, ensuring that the installer is already cached locally when needed.</p>
+
+<h3>2. Wrapper Execution Policy</h3>
+
+<p>The second policy runs this wrapper script. It handles:</p>
+
+<ul>
+<li>Prompting the user via SwiftDialog</li>
+<li>Tracking deferrals and enforcing upgrade deadlines</li>
+<li>Scheduling installations for later in the day or next login</li>
+<li>Initiating immediate upgrades if required</li>
+</ul>
+
+<p>This script is fully self-contained and <strong>remains available offline</strong> after deployment, allowing it to be triggered by LaunchDaemons, login hooks, or local schedules without requiring Jamf network connectivity.</p>
+
+<hr />
+
+<h2>Configuration</h2>
+
+<p>At the top of the script, these options are configurable:</p>
+
+<p>| Variable | Purpose | Default |
+|----------|---------|---------|
+| <code>SCRIPT_VERSION</code> | Current version of this script | <code>1.5.3</code> |
+| <code>INSTALLER_OS</code> | Target macOS version to upgrade to | <code>15</code> |
+| <code>MAX_DEFERS</code> | Maximum allowed 24-hour deferrals | <code>3</code> |
+| <code>FORCE_TIMEOUT_SECONDS</code> | Force install after timeout | <code>259200</code> |
+| <code>PLIST</code> | Preferences file location | <code>/Library/Preferences/com.macjediwizard.eraseinstall.plist</code> |
+| <code>SCRIPT_PATH</code> | Path to erase-install script | <code>/Library/Management/erase-install/erase-install.sh</code> |
+| <code>DIALOG_BIN</code> | Path to SwiftDialog binary | <code>/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog</code> |
+| <code>TEST_MODE</code> | Enable dry-run testing mode | <code>false</code> |
+| <code>SKIP_OS_VERSION_CHECK</code> | Bypass OS version checking in test mode | <code>false</code> |
+| <code>AUTO_INSTALL_DEPENDENCIES</code> | Auto-install erase-install and swiftDialog | <code>true</code> |
+| <code>DEBUG_MODE</code> | Enable verbose debug logs | <code>false</code> |
+| <code>MAX_LOG_SIZE_MB</code> | Max log file size before rotation | <code>10</code> |
+| <code>MAX_LOG_FILES</code> | Number of log files to keep | <code>5</code> |
+| <code>DIALOG_TITLE</code> | Dialog window title text | <code>"macOS Upgrade Required"</code> |
+| <code>DIALOG_MESSAGE</code> | Dialog main message | <code>"Please install macOS ${INSTALLER_OS}. Select an action:"</code> |
+| <code>DIALOG_INSTALL_NOW_TEXT</code> | Text for 'Install Now' option | <code>"Install Now"</code> |
+| <code>DIALOG_SCHEDULE_TODAY_TEXT</code> | Text for 'Schedule Today' option | <code>"Schedule Today"</code> |
+| <code>DIALOG_DEFER_TEXT</code> | Text for 'Defer 24 Hours' option | <code>"Defer 24 Hours"</code> |
+| <code>DIALOG_DEFER_TEXT_TEST_MODE</code> | Text for test mode defer option | <code>"Defer 5 Minutes (TEST MODE)"</code> |
+| <code>DIALOG_ICON</code> | Dialog icon (SF Symbol or path) | <code>"SF=gear"</code> |
+| <code>DIALOG_POSITION</code> | Dialog window position on screen | <code>"topright"</code> |</p>
+
+<hr />
+
+<h2>Testing Features</h2>
+
+<p>The script includes several features to simplify testing and QA workflows:</p>
+
+<h3>Test Mode</h3>
+
+<p>When <code>TEST_MODE=true</code>:
+- Dialog displays "TEST MODE" indicator in title
+- Deferral periods are shortened to 5 minutes instead of 24 hours
+- Dialog shows "Defer 5 Minutes (TEST MODE)" instead of "Defer 24 Hours"</p>
+
+<h3>OS Version Check Bypass</h3>
+
+<p>When <code>SKIP_OS_VERSION_CHECK=true</code>:
+- Script proceeds with upgrade workflow even if system is already at the target OS version
+- Provides detailed OS version comparison logs with "what would happen" messages
+- Can be enabled via command line with <code>--test-os-check</code> parameter</p>
+
+<p>These testing features allow you to test the complete workflow without waiting for long deferral periods or having to downgrade test systems.</p>
+
+<hr />
+
+<h2>Recent Updates (v1.5.3)</h2>
+
+<ul>
+<li>🧪 Added OS Version Check Test Mode to bypass version checking for testing</li>
+<li>🕒 Implemented 5-minute quick deferrals in TEST_MODE instead of 24 hours </li>
+<li>🔄 Added SKIP<em>OS</em>VERSION_CHECK toggle and --test-os-check parameter</li>
+<li>🔐 Fixed race condition between UI helper and watchdog script with mutex flag</li>
+<li>🛡️ Enhanced time validation with better error handling</li>
+<li>🧹 Improved post-installation cleanup to preserve test resources</li>
+<li>📝 Centralized log path handling for consistent logging</li>
+<li>🖼️ Added test-specific dialog text for clear visual indicators in test mode</li>
+</ul>
+
+<hr />
+
+<h2>Usage</h2>
+
+<ol>
+<li>Deploy both policies to your Jamf environment:
+<ul>
+<li><strong>Installer Caching</strong>: fetches the installer in the background</li>
+<li><strong>Wrapper Execution</strong>: manages prompts, deferrals, and scheduling</li>
+</ul></li>
+<li>Customize dialog text and deferral limits at the top of the script</li>
+<li>Test using <code>TEST_MODE=true</code> and <code>SKIP_OS_VERSION_CHECK=true</code> for quick testing</li>
+<li>Run with <code>--test-os-check</code> parameter for one-time test mode activation</li>
+<li>Monitor logs and user deferral history via the preference plist</li>
+</ol>
+
+<hr />
+
+<h2>Scheduling Options</h2>
+
+<p>The script provides the following user-facing options:</p>
+
+<ul>
+<li><strong>Install Now</strong> – Start installation immediately  </li>
+<li><strong>Schedule Today</strong> – Choose a time later in the day  </li>
+<li><strong>Defer 24 Hours</strong> – Postpone installation for one day (max 3 times)  </li>
+<li><strong>Defer 5 Minutes</strong> – (Test mode only) Quick deferral for testing purposes</li>
+</ul>
+
+<p>Once the deferral limit or 72-hour window is reached, only Install Now and Schedule Today are presented.</p>
+
+<hr />
+
+<h2>License</h2>
+
+<p>This project is licensed under the MIT License. See the LICENSE file for more details.</p>
+
+<hr />
+
+<h2>Author</h2>
+
+<blockquote>
+  <p>Made with ❤️ by <a href="https://macjediwizard.com">MacJediWizard Consulting, Inc.</a></p>
+</blockquote>

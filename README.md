@@ -4,7 +4,7 @@ A silent macOS upgrade orchestration wrapper for [Graham Pugh's erase-install](h
 designed for enterprise environments using Jamf Pro or other MDMs.
 
 This script silently pre-caches macOS installers and prompts users only at the final decision point, balancing user flexibility with enforced upgrade deadlines.  
-Now with **automatic dependency installation**, **snooze functionality**, **login-time installation**, and **comprehensive diagnostics**.
+Now with **automatic dependency installation**, **test mode features**, **snooze functionality**, **login-time installation**, and **comprehensive diagnostics**.
 
 ---
 
@@ -14,11 +14,12 @@ Now with **automatic dependency installation**, **snooze functionality**, **logi
 - 🛡 Minimal user interruption  
 - ⏳ 24-hour deferral support (up to 3 times)  
 - ⏰ Snooze option for short-term deferrals (1–4 hours)  
+- 🧪 Test mode with quick 5-minute deferrals and OS version check bypass
 - 🔒 Forced upgrade after 72 hours or 3 deferrals  
 - 📅 Flexible scheduling options (today, tomorrow, or at next login)  
 - 🔐 Robust directory-based locking mechanism to prevent race conditions  
 - 🎯 Enhanced UI handling with proper user context display  
-- 🛠 Full dry-run testing with erase-install’s `--test-run`  
+- 🛠 Full dry-run testing with erase-install's `--test-run`  
 - 📦 Auto-installs erase-install and swiftDialog if missing  
 - ✍️ Configurable dialog text, button labels, and window position  
 - 🔄 Robust process tracking and cleanup procedures  
@@ -77,38 +78,64 @@ This script is fully self-contained and **remains available offline** after depl
 
 At the top of the script, these options are configurable:
 
-| Variable                     | Purpose                                        | Default |
-|-----------------------------|------------------------------------------------|---------|
-| `SCRIPT_VERSION`            | Current version of this script                 | `1.5.2` |
-| `INSTALLER_OS`              | Target macOS version to upgrade to             | `15`    |
-| `MAX_DEFERS`                | Maximum allowed 24-hour deferrals              | `3`     |
-| `FORCE_TIMEOUT_SECONDS`     | Force install after timeout                    | `259200`|
-| `PLIST`                     | Preferences file location                      | `/Library/Preferences/com.macjediwizard.eraseinstall.plist` |
-| `SCRIPT_PATH`               | Path to erase-install script                   | `/Library/Management/erase-install/erase-install.sh` |
-| `DIALOG_BIN`                | Path to SwiftDialog binary                     | `/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog` |
-| `TEST_MODE`                 | Enable dry-run testing mode                    | `false` |
-| `AUTO_INSTALL_DEPENDENCIES` | Auto-install erase-install and swiftDialog     | `true`  |
-| `DEBUG_MODE`                | Enable verbose debug logs                      | `false` |
-| `MAX_LOG_SIZE_MB`           | Max log file size before rotation              | `10`    |
-| `MAX_LOG_FILES`             | Number of log files to keep                    | `5`     |
-| `DIALOG_TITLE`              | Dialog window title text                       | `"macOS Upgrade Required"` |
-| `DIALOG_MESSAGE`            | Dialog main message                            | `"Please install macOS ${INSTALLER_OS}. Select an action:"` |
-| `DIALOG_INSTALL_NOW_TEXT`  | Text for 'Install Now' option                  | `"Install Now"` |
-| `DIALOG_SCHEDULE_TODAY_TEXT`| Text for 'Schedule Today' option               | `"Schedule Today"` |
-| `DIALOG_DEFER_TEXT`         | Text for 'Defer 24 Hours' option               | `"Defer 24 Hours"` |
-| `DIALOG_ICON`               | Dialog icon (SF Symbol or path)                | `"SF=gear"` |
-| `DIALOG_POSITION`           | Dialog window position on screen               | `"topright"` |
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `SCRIPT_VERSION` | Current version of this script | `1.5.3` |
+| `INSTALLER_OS` | Target macOS version to upgrade to | `15` |
+| `MAX_DEFERS` | Maximum allowed 24-hour deferrals | `3` |
+| `FORCE_TIMEOUT_SECONDS` | Force install after timeout | `259200` |
+| `PLIST` | Preferences file location | `/Library/Preferences/com.macjediwizard.eraseinstall.plist` |
+| `SCRIPT_PATH` | Path to erase-install script | `/Library/Management/erase-install/erase-install.sh` |
+| `DIALOG_BIN` | Path to SwiftDialog binary | `/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog` |
+| `TEST_MODE` | Enable dry-run testing mode | `false` |
+| `SKIP_OS_VERSION_CHECK` | Bypass OS version checking in test mode | `false` |
+| `AUTO_INSTALL_DEPENDENCIES` | Auto-install erase-install and swiftDialog | `true` |
+| `DEBUG_MODE` | Enable verbose debug logs | `false` |
+| `MAX_LOG_SIZE_MB` | Max log file size before rotation | `10` |
+| `MAX_LOG_FILES` | Number of log files to keep | `5` |
+| `DIALOG_TITLE` | Dialog window title text | `"macOS Upgrade Required"` |
+| `DIALOG_MESSAGE` | Dialog main message | `"Please install macOS ${INSTALLER_OS}. Select an action:"` |
+| `DIALOG_INSTALL_NOW_TEXT` | Text for 'Install Now' option | `"Install Now"` |
+| `DIALOG_SCHEDULE_TODAY_TEXT` | Text for 'Schedule Today' option | `"Schedule Today"` |
+| `DIALOG_DEFER_TEXT` | Text for 'Defer 24 Hours' option | `"Defer 24 Hours"` |
+| `DIALOG_DEFER_TEXT_TEST_MODE` | Text for test mode defer option | `"Defer 5 Minutes (TEST MODE)"` |
+| `DIALOG_ICON` | Dialog icon (SF Symbol or path) | `"SF=gear"` |
+| `DIALOG_POSITION` | Dialog window position on screen | `"topright"` |
 
 ---
 
-## Recent Updates (v1.5.2)
+## Testing Features
 
-- 🛠 Fixed octal parsing errors in time calculation functions  
-- 🕗 Handled leading zeros in times like 08:00 and 09:00  
-- 🧠 Improved time validation and parsing using base-10 conversion  
-- 📉 Enhanced error messages for formatting issues  
-- 🔄 Reorganized configuration variables for consistency  
-- 🧱 Standardized time handling across scheduling and deferral logic  
+The script includes several features to simplify testing and QA workflows:
+
+### Test Mode
+
+When `TEST_MODE=true`:
+- Dialog displays "TEST MODE" indicator in title
+- Deferral periods are shortened to 5 minutes instead of 24 hours
+- Dialog shows "Defer 5 Minutes (TEST MODE)" instead of "Defer 24 Hours"
+
+### OS Version Check Bypass
+
+When `SKIP_OS_VERSION_CHECK=true`:
+- Script proceeds with upgrade workflow even if system is already at the target OS version
+- Provides detailed OS version comparison logs with "what would happen" messages
+- Can be enabled via command line with `--test-os-check` parameter
+
+These testing features allow you to test the complete workflow without waiting for long deferral periods or having to downgrade test systems.
+
+---
+
+## Recent Updates (v1.5.3)
+
+- 🧪 Added OS Version Check Test Mode to bypass version checking for testing
+- 🕒 Implemented 5-minute quick deferrals in TEST_MODE instead of 24 hours 
+- 🔄 Added SKIP_OS_VERSION_CHECK toggle and --test-os-check parameter
+- 🔐 Fixed race condition between UI helper and watchdog script with mutex flag
+- 🛡️ Enhanced time validation with better error handling
+- 🧹 Improved post-installation cleanup to preserve test resources
+- 📝 Centralized log path handling for consistent logging
+- 🖼️ Added test-specific dialog text for clear visual indicators in test mode
 
 ---
 
@@ -118,8 +145,9 @@ At the top of the script, these options are configurable:
     - **Installer Caching**: fetches the installer in the background
     - **Wrapper Execution**: manages prompts, deferrals, and scheduling
 2. Customize dialog text and deferral limits at the top of the script
-3. Test using `TEST_MODE=true` for dry-run validation
-4. Monitor logs and user deferral history via the preference plist
+3. Test using `TEST_MODE=true` and `SKIP_OS_VERSION_CHECK=true` for quick testing
+4. Run with `--test-os-check` parameter for one-time test mode activation
+5. Monitor logs and user deferral history via the preference plist
 
 ---
 
@@ -130,6 +158,7 @@ The script provides the following user-facing options:
 - **Install Now** – Start installation immediately  
 - **Schedule Today** – Choose a time later in the day  
 - **Defer 24 Hours** – Postpone installation for one day (max 3 times)  
+- **Defer 5 Minutes** – (Test mode only) Quick deferral for testing purposes
 
 Once the deferral limit or 72-hour window is reached, only Install Now and Schedule Today are presented.
 
