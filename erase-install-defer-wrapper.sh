@@ -36,7 +36,10 @@
 #         - Implemented test_os_version_check() function for detailed version test logging
 #         - Updated all OS version check locations to support test mode
 #         - Added command-line --test-os-check parameter support
-#         - Fixed scheduling logic to properly test watchdog script execution
+#         - Fixed race condition between UI helper and watchdog script
+#         - Improved post-installation cleanup to preserve test resources
+#         - Enhanced time validation functions with better error handling
+#         - Centralized log path handling for consistency across execution contexts
 # v1.5.2 - Fixed 24-hour time calculation issues with proper base-10 conversion
 #         - Corrected octal parsing errors in time handling functions
 #         - Enhanced time validation in scheduling functions
@@ -92,7 +95,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.5.2"              # Current version of this script
+SCRIPT_VERSION="1.5.3"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -107,7 +110,7 @@ LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"  # Path t
 #
 # ---- Feature Toggles ----
 TEST_MODE=true                      # Set to false for production
-SKIP_OS_VERSION_CHECK=false         # Set to true to skip OS version checking for testing purposes
+SKIP_OS_VERSION_CHECK=true         # Set to true to skip OS version checking for testing purposes
 AUTO_INSTALL_DEPENDENCIES=true      # Automatically install erase-install and SwiftDialog if missing
 DEBUG_MODE=true                     # Enable detailed logging
 #
@@ -188,6 +191,24 @@ done
 # ---------------- Configuration ----------------
 CURRENT_RUN_ID=""
 
+# ---------------- Centralized Log Path Setup ----------------
+setup_log_path() {
+  if [[ $EUID -eq 0 ]]; then
+    # Running as root - use system log location
+    WRAPPER_LOG="/var/log/erase-install-wrapper.log"
+    LOG_DIR="/var/log"
+  else
+    # Running as regular user - use user-accessible location
+    WRAPPER_LOG="$HOME/Library/Logs/erase-install-wrapper.log"
+    LOG_DIR="$HOME/Library/Logs"
+  fi
+  # Export these variables to ensure all functions use the same paths
+  export WRAPPER_LOG LOG_DIR
+}
+
+# Call this function immediately
+setup_log_path
+
 # Determine absolute path for script regardless of how it was called
 # This ensures compatibility with Jamf and other deployment methods
 if [[ -L "${0}" ]]; then
@@ -213,17 +234,7 @@ if [[ ! "${WRAPPER_PATH}" = /* ]]; then
 fi
 
 # ---------------- Logging Configuration ----------------
-
-# Determine log location based on user context
-if [[ $EUID -eq 0 ]]; then
-  # Running as root - use system log location
-  WRAPPER_LOG="/var/log/erase-install-wrapper.log"
-  LOG_DIR="/var/log"
-else
-  # Running as regular user - use user-accessible location
-  WRAPPER_LOG="$HOME/Library/Logs/erase-install-wrapper.log"
-  LOG_DIR="$HOME/Library/Logs"
-fi
+# Log paths are now set by setup_log_path() function
 
 # ---------------- Logging Functions ----------------
 
@@ -244,11 +255,17 @@ init_logging() {
   
   # Create log file with proper permissions
   touch "${WRAPPER_LOG}" 2>/dev/null || {
-    # If touch fails, try alternative location as fallback
-    WRAPPER_LOG="/Users/Shared/erase-install-wrapper.log"
-    LOG_DIR="/Users/Shared"
-    [[ -d "${LOG_DIR}" ]] || mkdir -p "${LOG_DIR}" 2>/dev/null
-    touch "${WRAPPER_LOG}" 2>/dev/null
+    # If touch fails, use a fallback location but don't change WRAPPER_LOG
+    local fallback_log="/Users/Shared/erase-install-wrapper.log"
+    log_warn "Unable to write to $WRAPPER_LOG, trying fallback: $fallback_log"
+    touch "$fallback_log" 2>/dev/null
+    
+    # Only if fallback succeeds, update the path
+    if [[ -f "$fallback_log" ]]; then
+      WRAPPER_LOG="$fallback_log"
+      LOG_DIR="/Users/Shared"
+      export WRAPPER_LOG LOG_DIR
+    fi
   }
   
   # Set appropriate permissions
@@ -1067,38 +1084,44 @@ post_erase_install_cleanup() {
   # Wait briefly to ensure erase-install completes its operations
   sleep 5
   
-  # Clean up any remaining launch items
-  remove_existing_launchdaemon
-  
-  # Specifically check for the problematic startosinstall daemon
-  if [ -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist" ]; then
-    log_warn "Found startosinstall daemon after erase-install completed"
-    sudo launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
-    sudo launchctl bootout system/com.github.grahampugh.erase-install.startosinstall 2>/dev/null
-    sudo rm -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
-    log_info "Removed startosinstall daemon"
+  # In test mode with OS checks skipped, be more careful with cleanup
+  if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+    log_info "Test mode with OS version check skipped - performing targeted cleanup"
+    
+    # Only remove the known erase-install daemon without affecting scheduled daemons
+    if [ -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist" ]; then
+      log_warn "Found startosinstall daemon after erase-install completed"
+      sudo launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
+      sudo launchctl bootout system/com.github.grahampugh.erase-install.startosinstall 2>/dev/null
+      sudo rm -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
+      log_info "Removed startosinstall daemon"
+    fi
+  else
+    # Standard cleanup for normal operation
+    # Clean up any remaining launch items
+    remove_existing_launchdaemon
+    
+    # Specifically check for the problematic startosinstall daemon
+    if [ -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist" ]; then
+      log_warn "Found startosinstall daemon after erase-install completed"
+      sudo launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
+      sudo launchctl bootout system/com.github.grahampugh.erase-install.startosinstall 2>/dev/null
+      sudo rm -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
+      log_info "Removed startosinstall daemon"
+    fi
+    
+    # Handle any lingering watchdog daemons
+    for watchdog in $(ls /Library/LaunchDaemons/com.macjediwizard.eraseinstall.schedule.watchdog.*.plist 2>/dev/null); do
+      if [ -f "$watchdog" ]; then
+        log_warn "Found lingering watchdog daemon: $watchdog"
+        label=$(basename "$watchdog" .plist)
+        sudo launchctl remove "$label" 2>/dev/null
+        sudo launchctl bootout system/$label 2>/dev/null
+        sudo rm -f "$watchdog"
+        log_info "Removed watchdog daemon: $watchdog"
+      fi
+    done
   fi
-  
-  # Handle any lingering watchdog daemons
-  for watchdog in $(ls /Library/LaunchDaemons/com.macjediwizard.eraseinstall.schedule.watchdog.*.plist 2>/dev/null); do
-    if [ -f "$watchdog" ]; then
-      log_warn "Found lingering watchdog daemon: $watchdog"
-      label=$(basename "$watchdog" .plist)
-      sudo launchctl remove "$label" 2>/dev/null
-      sudo launchctl bootout system/$label 2>/dev/null
-      sudo rm -f "$watchdog"
-      log_info "Removed watchdog daemon: $watchdog"
-    fi
-  done
-  
-  # Final check for any remaining issue files
-  for pattern in "/Library/LaunchDaemons/com.github.grahampugh.erase-install*.plist" "/Library/LaunchDaemons/com.macjediwizard.eraseinstall*.plist"; do
-    if ls $pattern &>/dev/null; then
-      log_warn "Post-cleanup: Still found daemon files matching pattern: $pattern"
-      # Force remove them
-      sudo rm -f $pattern
-    fi
-  done
   
   log_info "Post-installation cleanup completed"
 }
@@ -1179,9 +1202,29 @@ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Helper script starting dialog" >> "\$LOG_F
 DIALOG_RESULT=\$?
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog completed with status: \$DIALOG_RESULT" >> "\$LOG_FILE"
 
-# Create trigger file to start installation
-touch "$trigger_file"
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created trigger file: $trigger_file" >> "\$LOG_FILE"
+# Wait for watchdog to be ready before creating trigger file
+WATCHDOG_READY_FLAG="/var/tmp/erase-install-watchdog-ready-${run_id}"
+TIMEOUT=30
+COUNTER=0
+
+# Wait for watchdog to be ready or timeout
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Waiting for watchdog to be ready..." >> "\$LOG_FILE"
+while [ ! -f "\$WATCHDOG_READY_FLAG" ] && [ \$COUNTER -lt \$TIMEOUT ]; do
+  sleep 1
+  COUNTER=\$((COUNTER + 1))
+done
+
+if [ -f "\$WATCHDOG_READY_FLAG" ]; then
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Watchdog is ready, creating trigger file" >> "\$LOG_FILE"
+  # Create trigger file to start installation
+  touch "$trigger_file"
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created trigger file: $trigger_file" >> "\$LOG_FILE"
+else
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Watchdog not ready after \$TIMEOUT seconds" >> "\$LOG_FILE"
+  # Create trigger file anyway as last resort
+  touch "$trigger_file"
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created trigger file anyway: $trigger_file" >> "\$LOG_FILE"
+fi
 
 # Notify user that installation is starting
 osascript -e 'display notification "Starting macOS installation process..." with title "macOS Upgrade"'
@@ -1278,10 +1321,29 @@ LOG_FILE="/var/log/erase-install-wrapper.watchdog.\${RUN_ID}.log"
 INSTALLER_OS="${INSTALLER_OS}"   # Target OS version to install
 SKIP_OS_VERSION_CHECK="${SKIP_OS_VERSION_CHECK}"   # Flag to skip OS version checks for testing
 
+# Function to create trigger file mutex
+init_trigger_mutex() {
+  # Create a flag to indicate watchdog is ready
+  WATCHDOG_READY_FLAG="/var/tmp/erase-install-watchdog-ready-${RUN_ID}"
+  
+  # Wait a moment for proper initialization
+  sleep 1
+  
+  # Create the ready flag
+  touch "\$WATCHDOG_READY_FLAG"
+  log_message "Watchdog initialization complete, ready for trigger file"
+  
+  # Clean up flag on exit
+  trap 'rm -f "\$WATCHDOG_READY_FLAG" 2>/dev/null' EXIT
+}
+
 # Function to log with timestamp
 log_message() {
   echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" >> "\$LOG_FILE"
 }
+
+# Initialize watchdog as early as possible
+init_trigger_mutex
 
 # Function to check if OS is already at or above the target version
 check_os_already_updated() {
@@ -2166,14 +2228,34 @@ set_options() {
 generate_time_options() {
   # Start with a clean slate
   local time_options=""
+  local error_state=false
   
-  # Get current hour and minute
-  local current_hour=$(date +%H)
-  local current_minute=$(date +%M)
+  # Get current hour and minute with error checking
+  local current_hour=$(date +%H 2>/dev/null)
+  local current_minute=$(date +%M 2>/dev/null)
+  
+  if [[ -z "$current_hour" || -z "$current_minute" ]]; then
+    log_error "Failed to get current time"
+    echo "08:00,09:00,10:00,11:00"  # Provide safe defaults
+    return 1
+  fi
   
   # Convert to base-10 integers to handle leading zeros properly
-  local current_hour_num=$((10#$current_hour))
-  local current_minute_num=$((10#$current_minute))
+  local current_hour_num
+  local current_minute_num
+  
+  # Safe conversion with error handling
+  if ! current_hour_num=$((10#$current_hour)) 2>/dev/null; then
+    log_error "Failed to convert hour to number: $current_hour"
+    current_hour_num=8  # Safe default
+    error_state=true
+  fi
+  
+  if ! current_minute_num=$((10#$current_minute)) 2>/dev/null; then
+    log_error "Failed to convert minute to number: $current_minute"
+    current_minute_num=0  # Safe default
+    error_state=true
+  fi
   
   # Add today's remaining hours in 15-minute increments
   # Calculate which 15-minute blocks remain in the current hour
@@ -2189,7 +2271,13 @@ generate_time_options() {
   local next_hour=$((current_hour_num + 1))
   if [ $next_hour -le 23 ]; then
     for h in $(seq $next_hour 23); do
-      local fmt_hour=$(printf "%02d" $h)
+      local fmt_hour
+      # Safely format the hour with error handling
+      if ! fmt_hour=$(printf "%02d" $h 2>/dev/null); then
+        log_error "Failed to format hour: $h"
+        fmt_hour="$h"  # Use unformatted as fallback
+        error_state=true
+      fi
       time_options="${time_options:+$time_options,}${fmt_hour}:00,${fmt_hour}:15,${fmt_hour}:30,${fmt_hour}:45"
     done
   fi
@@ -2201,7 +2289,13 @@ generate_time_options() {
   
   # Ensure we have at least some options
   if [ -z "$time_options" ]; then
+    log_warn "No viable time options generated, using fallback values"
     time_options="Tomorrow 08:00,Tomorrow 08:30,Tomorrow 09:00,Tomorrow 09:30"
+  fi
+  
+  # Log warning if errors occurred
+  if $error_state; then
+    log_warn "Some errors occurred during time option generation, results may be incomplete"
   fi
   
   printf "%s" "$time_options"
@@ -2209,12 +2303,19 @@ generate_time_options() {
 
 validate_time() {
   local input="$1"
-  local hour minute day month
+  local hour="" minute="" day="" month=""
+  local when=""
   
   if [[ "$input" == "Tomorrow "* ]]; then
     local t; t=$(echo "$input" | awk '{print $2}')
     hour=$(echo "$t" | cut -d: -f1)
     minute=$(echo "$t" | cut -d: -f2)
+    
+    # Check if hour and minute were properly extracted
+    if [[ -z "$hour" || -z "$minute" ]]; then
+      log_warn "Invalid time format for tomorrow: $input (failed to extract hour/minute)"
+      return 1
+    fi
     
     # Convert hour to base 10 to handle leading zeros
     hour=$((10#${hour}))
@@ -2226,12 +2327,18 @@ validate_time() {
       return 1
     fi
     
+    when="tomorrow"
     day=$(date -v+1d +%d)
     month=$(date -v+1d +%m)
-    printf "tomorrow %02d %02d %s %s" "$hour" "$minute" "$day" "$month"
   else
     hour=$(echo "$input" | cut -d: -f1)
     minute=$(echo "$input" | cut -d: -f2)
+    
+    # Check if hour and minute were properly extracted
+    if [[ -z "$hour" || -z "$minute" ]]; then
+      log_warn "Invalid time format: $input (failed to extract hour/minute)"
+      return 1
+    fi
     
     # Convert hour and minute to base 10 to handle leading zeros
     hour=$((10#${hour}))
@@ -2243,10 +2350,22 @@ validate_time() {
       return 1
     fi
     
-    printf "today %02d %02d" "$hour" "$minute"
+    when="today"
+  fi
+  
+  # Ensure we have all required values before returning
+  if [[ -z "$when" || -z "$hour" || -z "$minute" ]]; then
+    log_warn "Failed to extract valid time components from: $input"
+    return 1
+  fi
+  
+  if [[ "$when" == "tomorrow" ]]; then
+    printf "%s %02d %02d %s %s" "$when" "$hour" "$minute" "$day" "$month"
+  else
+    printf "%s %02d %02d" "$when" "$hour" "$minute"
   fi
 }
-  
+
 show_prompt() {
   log_info "Displaying SwiftDialog dropdown prompt."
   
