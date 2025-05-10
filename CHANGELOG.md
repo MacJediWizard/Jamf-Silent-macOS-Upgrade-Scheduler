@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.3] - 2025-05-10
+### Added
+- OS Version Check Test Mode to enable testing on systems already at target OS version
+- New configuration toggle `SKIP_OS_VERSION_CHECK` to enable testing regardless of OS version
+- Command-line parameter `--test-os-check` to enable test mode directly when running script
+- Detailed test function `test_os_version_check()` with comprehensive version check logging
+- Updated watchdog script to include OS version test mode support
+- Enhanced logging for test mode including detailed "what would happen" status messages
+
+### Changed
+- Modified all OS version check logic to conditionally bypass based on test mode
+- Updated early OS check, scheduled check, and deferral check to support test mode
+- Enhanced scheduled installation commands to properly handle test mode parameters
+- Improved watchdog script template with test mode parameter passing
+- Additional logging to show exactly what would happen in normal operation
+
+### Fixed
+- Issue where systems already at target OS couldn't be used for testing upgrade workflows
+- Inconsistent watchdog behavior when testing scheduled installations
+- Test run clarity in logs with explicit test mode status indicators
+
+---
+
 ## [1.5.2] - 2025-05-04
 ### Fixed
 - Fixed octal parsing errors in time calculation functions (resolving "value too great for base" errors)

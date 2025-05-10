@@ -31,6 +31,12 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.5.3 - Added OS Version Check Test Mode to bypass version checking for testing
+#         - Added SKIP_OS_VERSION_CHECK toggle in feature settings
+#         - Implemented test_os_version_check() function for detailed version test logging
+#         - Updated all OS version check locations to support test mode
+#         - Added command-line --test-os-check parameter support
+#         - Fixed scheduling logic to properly test watchdog script execution
 # v1.5.2 - Fixed 24-hour time calculation issues with proper base-10 conversion
 #         - Corrected octal parsing errors in time handling functions
 #         - Enhanced time validation in scheduling functions
@@ -101,6 +107,7 @@ LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"  # Path t
 #
 # ---- Feature Toggles ----
 TEST_MODE=true                      # Set to false for production
+SKIP_OS_VERSION_CHECK=false         # Set to true to skip OS version checking for testing purposes
 AUTO_INSTALL_DEPENDENCIES=true      # Automatically install erase-install and SwiftDialog if missing
 DEBUG_MODE=true                     # Enable detailed logging
 #
@@ -283,6 +290,44 @@ log_system_info() {
   
   # Log where we're writing logs to help with debugging
   log_system "Log File Location: ${WRAPPER_LOG}"
+}
+
+# ---- OS Version Check Test Function ----
+
+test_os_version_check() {
+  log_info "===== OS VERSION CHECK TEST MODE ====="
+  log_info "Test modes active: TEST_MODE=${TEST_MODE}, SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}"
+  
+  # Get current OS version
+  local current_os=$(sw_vers -productVersion)
+  log_info "Current OS version: $current_os"
+  
+  # Get target OS version
+  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "${INSTALLER_OS}")
+  log_info "Target OS version: $target_os"
+  
+  # Run the normal OS version check
+  if check_os_already_updated; then
+    log_info "TEST RESULT: System is already running the target OS version."
+    log_info "In normal mode, the script would exit here."
+    log_info "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, the script will continue."
+  else
+    log_info "TEST RESULT: System needs to be updated to the target OS version."
+  fi
+  
+  # Run the deferral OS check
+  if check_if_os_upgraded_during_deferral; then
+    log_info "TEST RESULT: OS has been upgraded during deferral period or is already at target."
+    log_info "In normal mode, a scheduled installation would exit here."
+    log_info "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, the script will continue."
+  else
+    log_info "TEST RESULT: OS has NOT been upgraded during deferral and needs update."
+  fi
+  
+  log_info "===== OS VERSION CHECK TEST COMPLETE ====="
+  
+  # Return true (0) to allow script to continue regardless of actual OS versions
+  return 0
 }
 
 # ---------------- Locking Functions ----------------
@@ -497,6 +542,232 @@ dependency_check() {
   return $has_error
 }
 
+# ---------------- Version Check Functions ----------------
+
+get_available_macos_version() {
+  # Redirect all log output to stderr instead of stdout
+  log_info "Using erase-install to check available macOS version..." >&2
+  
+  # Create a temporary file to store the output
+  local tmp_file=$(mktemp)
+  
+  # Run erase-install with list-only flag
+  # This will show available macOS versions without downloading anything
+  log_info "Running erase-install in list-only mode..." >&2
+  
+  # The --list-only flag shows available installers without downloading
+  "${SCRIPT_PATH}" --list-only > "$tmp_file" 2>&1
+  
+  # Extract the version information from the output
+  local available_version=""
+  
+  # First check if erase-install found an installer
+  if grep -q "Installer is at:" "$tmp_file"; then
+    log_info "Installer found by erase-install" >&2
+    
+    # Look for system version in the output
+    if grep -q "System version:" "$tmp_file"; then
+      available_version=$(grep "System version:" "$tmp_file" | head -1 | awk -F': ' '{print $2}' | awk '{print $1}')
+      log_info "Using system version from erase-install output: $available_version" >&2
+      # Look for macOS Sequoia or similar name patterns
+    elif grep -q "Install macOS.*\.app" "$tmp_file"; then
+      # Extract the app name
+      local app_name=$(grep "Install macOS.*\.app" "$tmp_file" | head -1 | grep -o "Install macOS.*\.app")
+      log_info "Found installer app: $app_name" >&2
+      
+      # Get the version directly from the system
+      if [[ -f "/Applications/$app_name/Contents/Info.plist" ]]; then
+        available_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "/Applications/$app_name/Contents/Info.plist" 2>/dev/null)
+        log_info "Extracted version from installer app: $available_version" >&2
+      fi
+    fi
+  fi
+  
+  # If we still don't have a version, look for more patterns in the output
+  if [[ -z "$available_version" ]]; then
+    # Try to extract from any Build value mentions
+    if grep -q "Build.*[0-9][0-9][A-Z][0-9]" "$tmp_file"; then
+      log_info "Found Build value in erase-install output" >&2
+      
+      # Since we have a build but not a version, we should use the system version
+      available_version=$(sw_vers -productVersion)
+      log_info "Using current system version as target: $available_version" >&2
+    fi
+  fi
+  
+  # Clean up
+  rm -f "$tmp_file"
+  
+  # If we couldn't get a version, use INSTALLER_OS as fallback
+  if [[ -z "$available_version" ]]; then
+    available_version="$INSTALLER_OS"
+    log_info "Using INSTALLER_OS as fallback version: $available_version" >&2
+  fi
+  
+  # Only return the version, not any logs or debug output
+  echo "$available_version"
+}
+
+check_os_already_updated() {
+  log_info "Checking if OS is already at or above the target version..."
+  
+  # Get current OS version
+  local current_os=$(sw_vers -productVersion)
+  log_info "Current OS version: $current_os"
+  
+  # Get the target OS version from the plist (determined from erase-install)
+  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null)
+  if [[ -z "$target_os" ]]; then
+    # If we don't have it stored, get it now
+    target_os=$(get_available_macos_version)
+    defaults write "${PLIST}" targetOSVersion -string "${target_os}"
+  fi
+  log_info "Target OS version: $target_os"
+  
+  # Extract major versions
+  local current_major=$(echo "$current_os" | cut -d. -f1)
+  local target_major=$(echo "$target_os" | cut -d. -f1)
+  
+  # Compare major versions
+  if [[ $current_major -gt $target_major ]]; then
+    log_info "Current OS major version ($current_major) is greater than target major version ($target_major)"
+    return 0  # No update needed
+  elif [[ $current_major -lt $target_major ]]; then
+    log_info "Current OS major version ($current_major) is less than target major version ($target_major)"
+    return 1  # Update needed
+  else
+    # Major versions are equal, compare minor versions
+    log_info "Major versions are equal. Checking minor versions..."
+    
+    # Split versions by dots for comparison
+    IFS='.' read -ra CURRENT_VER <<< "$current_os"
+    IFS='.' read -ra TARGET_VER <<< "$target_os"
+    
+    # Compare each component
+    for ((i=1; i<${#CURRENT_VER[@]} && i<${#TARGET_VER[@]}; i++)); do
+      if [[ ${CURRENT_VER[i]} -gt ${TARGET_VER[i]} ]]; then
+        log_info "Current version component ${CURRENT_VER[i]} is greater than target ${TARGET_VER[i]} at position $i"
+        return 0  # No update needed
+      elif [[ ${CURRENT_VER[i]} -lt ${TARGET_VER[i]} ]]; then
+        log_info "Current version component ${CURRENT_VER[i]} is less than target ${TARGET_VER[i]} at position $i"
+        return 1  # Update needed
+      fi
+    done
+    
+    # If we get here, all compared components are equal
+    # If target has more components, check if they're significant
+    if [[ ${#TARGET_VER[@]} -gt ${#CURRENT_VER[@]} ]]; then
+      for ((i=${#CURRENT_VER[@]}; i<${#TARGET_VER[@]}; i++)); do
+        if [[ ${TARGET_VER[i]} -gt 0 ]]; then
+          log_info "Target version has additional significant component ${TARGET_VER[i]}"
+          return 1  # Update needed
+        fi
+      done
+    fi
+    
+    # If we get here, versions are compatible
+    log_info "Current version $current_os is compatible with target version $target_os"
+    return 0  # No update needed
+  fi
+}
+
+check_if_os_upgraded_during_deferral() {
+  log_info "Checking if OS was upgraded during deferral period..."
+  
+  # Get current OS version
+  local current_os=$(sw_vers -productVersion)
+  log_info "Current OS version: $current_os"
+  
+  # Get initial OS version when deferral started
+  local initial_os=$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "")
+  if [[ -z "$initial_os" ]]; then
+    log_info "No initial OS version recorded. Using current OS version."
+    defaults write "${PLIST}" initialOSVersion -string "${current_os}"
+    initial_os="$current_os"
+  fi
+  log_info "Initial OS version (when deferred): $initial_os"
+  
+  # Get target OS version from plist
+  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "")
+  if [[ -z "$target_os" ]]; then
+    log_info "No target OS version recorded. Using value from erase-install."
+    target_os=$(get_available_macos_version)
+    defaults write "${PLIST}" targetOSVersion -string "${target_os}"
+  fi
+  log_info "Target OS version: $target_os"
+  
+  # Extract version components
+  local current_major=$(echo "$current_os" | cut -d. -f1)
+  local initial_major=$(echo "$initial_os" | cut -d. -f1)
+  local target_major=$(echo "$target_os" | cut -d. -f1)
+  
+  # First, check if OS is already fully up-to-date compared to target
+  log_info "Performing exact version comparison..."
+  
+  # Split versions into components for detailed comparison
+  IFS='.' read -ra CURRENT_VER <<< "$current_os"
+  IFS='.' read -ra TARGET_VER <<< "$target_os"
+  
+  # Flag to track if we need to update
+  local needs_update=false
+  
+  # Check if major versions differ
+  if [[ ${CURRENT_VER[0]} -lt ${TARGET_VER[0]} ]]; then
+    log_info "Current major version (${CURRENT_VER[0]}) is less than target (${TARGET_VER[0]})"
+    needs_update=true
+  elif [[ ${CURRENT_VER[0]} -eq ${TARGET_VER[0]} ]]; then
+    # Major versions match, check minor/patch versions
+    log_info "Major versions match, checking minor versions..."
+    
+    # Compare each component after the major version
+    for ((i=1; i<${#CURRENT_VER[@]} && i<${#TARGET_VER[@]}; i++)); do
+      if [[ ${CURRENT_VER[i]} -lt ${TARGET_VER[i]} ]]; then
+        log_info "Current version component ${CURRENT_VER[i]} is less than target ${TARGET_VER[i]} at position $i"
+        needs_update=true
+        break
+      elif [[ ${CURRENT_VER[i]} -gt ${TARGET_VER[i]} ]]; then
+        log_info "Current version component ${CURRENT_VER[i]} is greater than target ${TARGET_VER[i]} at position $i"
+        break
+      fi
+      # If equal, continue to next component
+    done
+    
+    # If target has more components than current, check if they're significant
+    if [[ "$needs_update" == "false" && ${#TARGET_VER[@]} -gt ${#CURRENT_VER[@]} ]]; then
+      for ((i=${#CURRENT_VER[@]}; i<${#TARGET_VER[@]}; i++)); do
+        if [[ ${TARGET_VER[i]} -gt 0 ]]; then
+          log_info "Target version has additional significant component ${TARGET_VER[i]}"
+          needs_update=true
+          break
+        fi
+      done
+    fi
+  fi
+  
+  # If OS is already at or above target version, no update needed
+  if [[ "$needs_update" == "false" ]]; then
+    log_info "Current OS version ($current_os) is already at or above target version ($target_os)"
+    return 0  # No update needed
+  fi
+  
+  # At this point, we know the current version isn't fully up-to-date
+  log_info "Current OS version ($current_os) is not fully up-to-date compared to target ($target_os)"
+  
+  # Now check if a major upgrade occurred during deferral
+  if [[ "$current_major" -gt "$initial_major" ]]; then
+    log_info "Major OS upgrade detected during deferral (from $initial_os to $current_os)"
+    
+    # Policy decision: Proceed with update even after major upgrade to ensure full update
+    log_info "Although user performed major upgrade, current version isn't at latest minor version"
+    log_info "Proceeding with update to ensure system is fully up-to-date"
+    return 1  # Proceed with update
+  else 
+    # No major upgrade detected, update is needed
+    log_info "No major OS upgrade detected. Update is needed."
+    return 1  # Update needed
+  fi
+}
+
 # ---------------- Deferral State ----------------
 
 init_plist() {
@@ -504,6 +775,17 @@ init_plist() {
     defaults write "${PLIST}" scriptVersion -string "${SCRIPT_VERSION}"
     defaults write "${PLIST}" deferCount -int 0
     defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+    
+    # Add initial OS version and target version info
+    local current_os=$(sw_vers -productVersion)
+    defaults write "${PLIST}" initialOSVersion -string "${current_os}"
+    
+    # Use erase-install to determine available version
+    local available_version
+    available_version=$(get_available_macos_version)
+    defaults write "${PLIST}" targetOSVersion -string "${available_version}"
+    
+    log_info "Stored initial OS: $current_os and target OS: $available_version"
   else
     local ver; ver=$(defaults read "${PLIST}" scriptVersion 2>/dev/null || echo "")
     if [[ "${ver}" != "${SCRIPT_VERSION}" ]]; then
@@ -511,11 +793,32 @@ init_plist() {
       defaults write "${PLIST}" scriptVersion -string "${SCRIPT_VERSION}"
       defaults write "${PLIST}" deferCount -int 0
       defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+      
+      # Reset OS version info
+      local current_os=$(sw_vers -productVersion)
+      defaults write "${PLIST}" initialOSVersion -string "${current_os}"
+      
+      # Use erase-install to determine available version
+      local available_version
+      available_version=$(get_available_macos_version)
+      defaults write "${PLIST}" targetOSVersion -string "${available_version}"
+      
+      log_info "Updated initial OS: $current_os and target OS: $available_version"
     fi
   fi
   
   defaults read "${PLIST}" deferCount &>/dev/null || defaults write "${PLIST}" deferCount -int 0
   defaults read "${PLIST}" firstPromptDate &>/dev/null || defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+  defaults read "${PLIST}" initialOSVersion &>/dev/null || defaults write "${PLIST}" initialOSVersion -string "$(sw_vers -productVersion)"
+  
+  # Make sure we have target version
+  if ! defaults read "${PLIST}" targetOSVersion &>/dev/null; then
+    # Use erase-install to determine available version
+    local available_version
+    available_version=$(get_available_macos_version)
+    defaults write "${PLIST}" targetOSVersion -string "${available_version}"
+    log_info "Added missing target OS version: $available_version"
+  fi
 }
 
 reset_deferrals() {
@@ -972,10 +1275,171 @@ DAEMON_PATH="/Library/LaunchDaemons/\$DAEMON_LABEL.plist"
 HELPER_SCRIPT="$helper_script"
 WATCHDOG_SCRIPT="$watchdog_script"
 LOG_FILE="/var/log/erase-install-wrapper.watchdog.\${RUN_ID}.log"
+INSTALLER_OS="${INSTALLER_OS}"   # Target OS version to install
+SKIP_OS_VERSION_CHECK="${SKIP_OS_VERSION_CHECK}"   # Flag to skip OS version checks for testing
 
 # Function to log with timestamp
 log_message() {
   echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" >> "\$LOG_FILE"
+}
+
+# Function to check if OS is already at or above the target version
+check_os_already_updated() {
+  # Get current OS version
+  local current_os=\$(sw_vers -productVersion)
+  log_message "Current OS version: \$current_os"
+  
+  # Get the target OS version from the plist
+  local target_os=\$(defaults read "${PLIST}" targetOSVersion 2>/dev/null)
+  if [[ -z "\$target_os" ]]; then
+    # If we don't have it stored, use INSTALLER_OS
+    target_os="\${INSTALLER_OS}"
+    log_message "No stored target version found. Using INSTALLER_OS: \$target_os"
+  else
+    log_message "Using stored target OS version: \$target_os"
+  fi
+  
+  # Extract major versions
+  local current_major=\$(echo "\$current_os" | cut -d. -f1)
+  local target_major=\$(echo "\$target_os" | cut -d. -f1)
+  
+  # Compare major versions
+  if [[ \$current_major -gt \$target_major ]]; then
+    log_message "Current OS major version (\$current_major) is greater than target major version (\$target_major)"
+    return 0  # No update needed
+  elif [[ \$current_major -lt \$target_major ]]; then
+    log_message "Current OS major version (\$current_major) is less than target major version (\$target_major)"
+    return 1  # Update needed
+  else
+    # Major versions are equal, compare minor versions
+    log_message "Major versions are equal. Checking minor versions..."
+    
+    # Split versions by dots for comparison
+    IFS='.' read -ra CURRENT_VER <<< "\$current_os"
+    IFS='.' read -ra TARGET_VER <<< "\$target_os"
+    
+    # Compare each component
+    for ((i=1; i<\${#CURRENT_VER[@]} && i<\${#TARGET_VER[@]}; i++)); do
+      if [[ \${CURRENT_VER[i]} -gt \${TARGET_VER[i]} ]]; then
+        log_message "Current version component \${CURRENT_VER[i]} is greater than target \${TARGET_VER[i]} at position \$i"
+        return 0  # No update needed
+      elif [[ \${CURRENT_VER[i]} -lt \${TARGET_VER[i]} ]]; then
+        log_message "Current version component \${CURRENT_VER[i]} is less than target \${TARGET_VER[i]} at position \$i"
+        return 1  # Update needed
+      fi
+    done
+    
+    # If we get here, all compared components are equal
+    # If target has more components, check if they're significant
+    if [[ \${#TARGET_VER[@]} -gt \${#CURRENT_VER[@]} ]]; then
+      for ((i=\${#CURRENT_VER[@]}; i<\${#TARGET_VER[@]}; i++)); do
+        if [[ \${TARGET_VER[i]} -gt 0 ]]; then
+          log_message "Target version has additional significant component \${TARGET_VER[i]}"
+          return 1  # Update needed
+        fi
+      done
+    fi
+    
+    # If we get here, versions are compatible
+    log_message "Current version \$current_os is compatible with target version \$target_os"
+    return 0  # No update needed
+  fi
+}
+
+# Function to check if OS was upgraded during deferral
+check_if_os_upgraded_during_deferral() {
+  log_message "Checking if OS was upgraded during deferral period..."
+  
+  # Get current OS version
+  local current_os=\$(sw_vers -productVersion)
+  log_message "Current OS version: \$current_os"
+  
+  # Get initial OS version when deferral started
+  local initial_os=\$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "")
+  if [[ -z "\$initial_os" ]]; then
+    log_message "No initial OS version recorded. Using current OS version."
+    initial_os="\$current_os"
+  fi
+  log_message "Initial OS version (when deferred): \$initial_os"
+  
+  # Get target OS version from plist
+  local target_os=\$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "")
+  if [[ -z "\$target_os" ]]; then
+    log_message "No target OS version recorded. Using INSTALLER_OS value."
+    target_os="\${INSTALLER_OS}"
+  fi
+  log_message "Target OS version: \$target_os"
+  
+  # Extract version components
+  local current_major=\$(echo "\$current_os" | cut -d. -f1)
+  local initial_major=\$(echo "\$initial_os" | cut -d. -f1)
+  local target_major=\$(echo "\$target_os" | cut -d. -f1)
+  
+  # First, check if OS is already fully up-to-date compared to target
+  log_message "Performing exact version comparison..."
+  
+  # Split versions into components for detailed comparison
+  IFS='.' read -ra CURRENT_VER <<< "\$current_os"
+  IFS='.' read -ra TARGET_VER <<< "\$target_os"
+  
+  # Flag to track if we need to update
+  local needs_update=false
+  
+  # Check if major versions differ
+  if [[ \${CURRENT_VER[0]} -lt \${TARGET_VER[0]} ]]; then
+    log_message "Current major version (\${CURRENT_VER[0]}) is less than target (\${TARGET_VER[0]})"
+    needs_update=true
+  elif [[ \${CURRENT_VER[0]} -eq \${TARGET_VER[0]} ]]; then
+    # Major versions match, check minor/patch versions
+    log_message "Major versions match, checking minor versions..."
+    
+    # Compare each component after the major version
+    for ((i=1; i<\${#CURRENT_VER[@]} && i<\${#TARGET_VER[@]}; i++)); do
+      if [[ \${CURRENT_VER[i]} -lt \${TARGET_VER[i]} ]]; then
+        log_message "Current version component \${CURRENT_VER[i]} is less than target \${TARGET_VER[i]} at position \$i"
+        needs_update=true
+        break
+      elif [[ \${CURRENT_VER[i]} -gt \${TARGET_VER[i]} ]]; then
+        log_message "Current version component \${CURRENT_VER[i]} is greater than target \${TARGET_VER[i]} at position \$i"
+        break
+      fi
+      # If equal, continue to next component
+    done
+    
+    # If target has more components than current, check if they're significant
+    if [[ "\$needs_update" == "false" && \${#TARGET_VER[@]} -gt \${#CURRENT_VER[@]} ]]; then
+      for ((i=\${#CURRENT_VER[@]}; i<\${#TARGET_VER[@]}; i++)); do
+        if [[ \${TARGET_VER[i]} -gt 0 ]]; then
+          log_message "Target version has additional significant component \${TARGET_VER[i]}"
+          needs_update=true
+          break
+        fi
+      done
+    fi
+  fi
+  
+  # If OS is already at or above target version, no update needed
+  if [[ "\$needs_update" == "false" ]]; then
+    log_message "Current OS version (\$current_os) is already at or above target version (\$target_os)"
+    return 0  # No update needed
+  fi
+  
+  # At this point, we know the current version isn't fully up-to-date
+  log_message "Current OS version (\$current_os) is not fully up-to-date compared to target (\$target_os)"
+  
+  # Now check if a major upgrade occurred during deferral
+  if [[ "\$current_major" -gt "\$initial_major" ]]; then
+    log_message "Major OS upgrade detected during deferral (from \$initial_os to \$current_os)"
+    
+    # Policy decision: Proceed with update even after major upgrade to ensure full update
+    log_message "Although user performed major upgrade, current version isn't at latest minor version"
+    log_message "Proceeding with update to ensure system is fully up-to-date"
+    return 1  # Proceed with update
+  else
+    # No major upgrade detected, update is needed
+    log_message "No major OS upgrade detected. Update is needed."
+    return 1  # Update needed
+  fi
 }
 
 # Function to clean up watchdog components
@@ -1132,14 +1596,29 @@ while [ ! -f "\$TRIGGER_FILE" ] && [ \$COUNTER -lt \$MAX_WAIT ]; do
   COUNTER=\$((COUNTER + SLEEP_INTERVAL))
 done
 
-# If trigger file exists, run erase-install
+# If trigger file exists, first check OS version, then run erase-install if needed
 if [ -f "\$TRIGGER_FILE" ]; then
   # Remove trigger file
   rm -f "\$TRIGGER_FILE"
-  log_message "Trigger file found, starting installation"
+  log_message "Trigger file found, checking OS version before starting installation"
   
-  # Run erase-install
-  log_message "Running erase-install with parameters: --reinstall --rebootdelay ${REBOOT_DELAY} $([ "$NO_FS" = true ] && echo "--no-fs") $([ "$CHECK_POWER" = true ] && echo "--check-power") --min-drive-space ${MIN_DRIVE_SPACE} $([ "$CLEANUP_AFTER_USE" = true ] && echo "--cleanup-after-use") $([ "$TEST_MODE" = true ] && echo "--test-run") $([ "$DEBUG_MODE" = true ] && echo "--verbose")"
+  # Check if OS was upgraded during deferral
+  if [[ "\$SKIP_OS_VERSION_CHECK" == "true" ]]; then
+    log_message "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+    # Run the check but ignore the result
+    check_if_os_upgraded_during_deferral
+    log_message "Test mode - proceeding with installation regardless of OS version"
+  elif check_if_os_upgraded_during_deferral; then
+    log_message "OS already updated to meet target version. No need to install. Exiting."
+    # Display a notification to the user
+    osascript -e 'display notification "Your macOS is already up to date. No installation required." with title "macOS Upgrade"'
+    # Clean up and exit
+    cleanup_watchdog
+    exit 0
+  fi
+  
+  # OS needs update, proceed with installation
+  log_message "OS needs to be updated. Running erase-install with parameters: --reinstall --rebootdelay ${REBOOT_DELAY} $([ "$NO_FS" = true ] && echo "--no-fs") $([ "$CHECK_POWER" = true ] && echo "--check-power") --min-drive-space ${MIN_DRIVE_SPACE} $([ "$CLEANUP_AFTER_USE" = true ] && echo "--cleanup-after-use") $([ "$TEST_MODE" = true ] && echo "--test-run") $([ "$DEBUG_MODE" = true ] && echo "--verbose")"
   
   /Library/Management/erase-install/erase-install.sh --reinstall --rebootdelay ${REBOOT_DELAY} $([ "$NO_FS" = true ] && echo "--no-fs") $([ "$CHECK_POWER" = true ] && echo "--check-power") --min-drive-space ${MIN_DRIVE_SPACE} $([ "$CLEANUP_AFTER_USE" = true ] && echo "--cleanup-after-use") $([ "$TEST_MODE" = true ] && echo "--test-run") $([ "$DEBUG_MODE" = true ] && echo "--verbose")
   
@@ -1767,7 +2246,7 @@ validate_time() {
     printf "today %02d %02d" "$hour" "$minute"
   fi
 }
-    
+  
 show_prompt() {
   log_info "Displaying SwiftDialog dropdown prompt."
   
@@ -1806,6 +2285,24 @@ show_prompt() {
       # Ensure any existing LaunchDaemons are removed for "Install Now"
       remove_existing_launchdaemon
       reset_deferrals
+      
+      # Check if OS is already at the target version
+      log_info "Checking if OS is already up-to-date before proceeding with immediate installation..."
+      if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+        log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+        test_os_version_check
+      elif check_os_already_updated; then
+        log_info "System is already running the target OS version. No update needed."
+        
+        # Show a notification to the user
+        if [ -n "$console_user" ] && [ "$console_user" != "root" ] && [ -n "$console_uid" ]; then
+          launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e 'display notification "Your macOS is already up to date. No update required." with title "macOS Upgrade"'
+        fi
+        
+        log_info "Exiting without installation as OS is already up-to-date."
+        return 0
+      fi
+      
       # Skip countdown for immediate installations - go directly to installation
       log_info "Install Now selected - proceeding directly to installation"
       local install_result=0
@@ -1813,7 +2310,7 @@ show_prompt() {
       install_result=$?
       return $install_result
     ;;
-
+    
     "${DIALOG_SCHEDULE_TODAY_TEXT}")
       local sched subcode time_data hour minute day month
       local time_options; time_options=$(generate_time_options)
@@ -1842,15 +2339,41 @@ show_prompt() {
       fi
       
       # Parse time data
-      # Parse time data
       read -r when hour minute day month <<< "$time_data"
       
       # Convert to proper numeric values for display
       local hour_num=$((10#${hour}))
       local minute_num=$((10#${minute}))
       
+      # Check if OS is already at the target version
+      log_info "Checking if OS is already up-to-date before scheduling installation..."
+      if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+        log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+        test_os_version_check
+      elif check_os_already_updated; then
+        log_info "System is already running the target OS version. No update needed."
+        
+        # Show a notification to the user
+        if [ -n "$console_user" ] && [ "$console_user" != "root" ] && [ -n "$console_uid" ]; then
+          launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e 'display notification "Your macOS is already up to date. No scheduled installation required." with title "macOS Upgrade"'
+        fi
+        
+        log_info "Exiting without scheduling installation as OS is already up-to-date."
+        return 0
+      fi
+      
       # Remove any existing daemons
       remove_existing_launchdaemon
+      
+      # Store current OS version for comparison when daemon runs
+      local current_os=$(sw_vers -productVersion)
+      defaults write "${PLIST}" initialOSVersion -string "${current_os}"
+      
+      # Use erase-install to determine available version
+      local available_version
+      available_version=$(get_available_macos_version)
+      defaults write "${PLIST}" targetOSVersion -string "${available_version}"
+      log_info "Stored initial OS: $current_os and target OS: $available_version for scheduled installation"
       
       if [[ "$when" == "tomorrow" ]]; then
         log_info "Scheduling for tomorrow at $(printf '%02d:%02d' $((hour_num)) $((minute_num)))"
@@ -1872,12 +2395,40 @@ show_prompt() {
       if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
         log_warn "Maximum deferrals (${MAX_DEFERS}) reached."
         reset_deferrals
+        
+        # Check if OS is already at the target version
+        log_info "Checking if OS is already up-to-date before forced installation after max deferrals..."
+        if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+          log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+          test_os_version_check
+        elif check_os_already_updated; then
+          log_info "System is already running the target OS version. No update needed."
+          
+          # Show a notification to the user
+          if [ -n "$console_user" ] && [ "$console_user" != "root" ] && [ -n "$console_uid" ]; then
+            launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e 'display notification "Your macOS is already up to date. No update required." with title "macOS Upgrade"'
+          fi
+          
+          log_info "Exiting without installation as OS is already up-to-date."
+          return 0
+        fi
+        
         # Show countdown for installations after deferral expiry
         show_preinstall "true"
       else
         newCount=$((deferCount + 1))
         defaults write "${PLIST}" deferCount -int "$newCount"
         log_info "Deferred (${newCount}/${MAX_DEFERS})"
+        
+        # Store current OS version and target OS version
+        local current_os=$(sw_vers -productVersion)
+        defaults write "${PLIST}" initialOSVersion -string "${current_os}"
+        
+        # Use erase-install to determine available version
+        local available_version
+        available_version=$(get_available_macos_version)
+        defaults write "${PLIST}" targetOSVersion -string "${available_version}"
+        log_info "Stored initial OS: $current_os and target OS: $available_version for deferral comparison"
         
         # Get tomorrow's time
         local defer_hour; defer_hour=$(date -v+24H +%H)
@@ -1890,16 +2441,16 @@ show_prompt() {
         
         # Create LaunchDaemon with original time values (preserving leading zeros)
         if create_scheduled_launchdaemon "${defer_hour}" "${defer_min}" "${defer_day}" "${defer_month}" "prompt"; then
-            # Base-10 conversion only for display
-            local display_hour=$((10#${defer_hour}))
-            local display_min=$((10#${defer_min}))
-            log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "${display_hour}" "${display_min}")"
+          # Base-10 conversion only for display
+          local display_hour=$((10#${defer_hour}))
+          local display_min=$((10#${defer_min}))
+          log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "${display_hour}" "${display_min}")"
         else
-            log_error "Failed to schedule re-prompt"
-            return 1
+          log_error "Failed to schedule re-prompt"
+          return 1
         fi
       fi
-      ;;
+    ;;
     *)
       log_warn "Unexpected selection: $selection"
       return 1
@@ -1910,6 +2461,13 @@ show_prompt() {
 }
 
 # ---------------- Main ----------------
+
+# Check for test mode argument
+if [[ "$1" == "--test-os-check" ]]; then
+  # Enable the OS version check test mode
+  SKIP_OS_VERSION_CHECK=true
+  shift  # Remove this argument and continue processing others
+fi
 
 # First, check for cleanup command option
 if [[ "$1" == "--cleanup" ]]; then
@@ -2148,6 +2706,20 @@ EOF
   # Run the actual installation
   log_info "Starting installation process"
   
+  # Check if OS is already updated before running installation
+  log_info "Checking if OS is already at or above target version..."
+  if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+    log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+    test_os_version_check
+  elif check_if_os_upgraded_during_deferral; then
+    log_info "OS already updated to target version or newer. No need to install. Exiting."
+    cleanup_and_exit
+    exit 0
+  fi
+  
+  # OS needs update, proceed with installation
+  log_info "OS needs to be updated. Starting installation process"
+  
   # When running from LaunchDaemon (as root), we can run erase-install directly
   if [[ $EUID -eq 0 ]]; then
     log_info "Running erase-install as root"
@@ -2162,6 +2734,7 @@ EOF
   cleanup_and_exit
 fi
 
+#---------------------MAIN-------------------------------
 # Main script execution for non-scheduled mode
 init_logging
 log_info "Starting erase-install wrapper script v${SCRIPT_VERSION}"
@@ -2201,6 +2774,36 @@ fi
 # Initialize plist for deferral tracking
 init_plist
 
+# Check if system is already running the target OS version
+log_info "Performing early OS version check..."
+if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+  log_info "SKIP_OS_VERSION_CHECK is enabled - running test mode but continuing regardless of OS version"
+  test_os_version_check
+elif check_os_already_updated; then
+  log_info "System is already running the target OS version. No update needed."
+  
+  # Show a notification to the user
+  console_user=""
+  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  
+  if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
+    console_uid=""  # Fix: Remove 'local' keyword
+    console_uid=$(id -u "$console_user" 2>/dev/null || echo "")
+    if [ -n "$console_uid" ]; then
+      launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e 'display notification "Your macOS is already up to date. No update required." with title "macOS Upgrade"'
+    fi
+  fi
+  
+  # Clean up any resources
+  remove_existing_launchdaemon
+  
+  log_info "Exiting script as no update is needed."
+  exit 0
+fi
+
+
 # Get current deferral state
 get_deferral_state
 
@@ -2216,7 +2819,6 @@ fi
 # Call this function at the very end of your main script
 log_info "Verifying Complete System Cleanup"
 verify_complete_system_cleanup
-
 
 log_info "Script completed successfully"
 exit 0
