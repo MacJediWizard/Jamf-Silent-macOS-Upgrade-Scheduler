@@ -31,16 +31,16 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
-# v1.5.3 - Added OS Version Check Test Mode to bypass version checking for testing
+# v1.5.3 - Added comprehensive Test Mode features to streamline development and QA
+#         - Added OS Version Check Test Mode to bypass version checking for testing
+#         - Implemented 5-minute quick deferrals in TEST_MODE instead of 24 hours 
 #         - Added SKIP_OS_VERSION_CHECK toggle in feature settings
-#         - Implemented 5-minute quick deferrals when in TEST_MODE instead of 24 hours 
-#         - Added test_os_version_check() function for detailed version test logging
-#         - Updated all OS version check locations to support test mode
 #         - Added command-line --test-os-check parameter support
-#         - Fixed race condition between UI helper and watchdog script
+#         - Fixed race condition between UI helper and watchdog script with mutex flag
+#         - Enhanced time validation with better error handling and robust fallbacks
 #         - Improved post-installation cleanup to preserve test resources
-#         - Enhanced time validation functions with better error handling
-#         - Centralized log path handling for consistency across execution contexts
+#         - Centralized log path handling for consistent logging across contexts
+#         - Added test-specific dialog text for clear visual indicators in test mode
 # v1.5.2 - Fixed 24-hour time calculation issues with proper base-10 conversion
 #         - Corrected octal parsing errors in time handling functions
 #         - Enhanced time validation in scheduling functions
@@ -133,7 +133,7 @@ DIALOG_MESSAGEFONT="size=14"                   # Font size for dialog message
 DIALOG_INSTALL_NOW_TEXT="Install Now"          # Text for immediate installation option
 DIALOG_SCHEDULE_TODAY_TEXT="Schedule Today"    # Text for schedule option
 DIALOG_DEFER_TEXT="Defer 24 Hours"             # Text for deferral option
-DIALOG_DEFER_TEXT_TEST_MODE="Defer 5 Minutes\n                (TEST MODE)"  # Text for deferral option in test mode
+DIALOG_DEFER_TEXT_TEST_MODE="Defer 5 Minutes   (TEST MODE)"  # Text for deferral option in test mode
 DIALOG_CONFIRM_TEXT="Confirm"                  # Button text for confirmation dialogs
 #
 # ---- Pre-installation Dialog ----
@@ -2224,8 +2224,14 @@ show_preinstall() {
 
 # -------------- Prompt Handling --------------
 set_options() {
-  local defer_text="${DIALOG_DEFER_TEXT}"
-  [[ "$TEST_MODE" == "true" ]] && defer_text="${DIALOG_DEFER_TEXT_TEST_MODE:-Defer 5 Minutes (Test Mode)}"
+  local defer_text
+  if [[ "$TEST_MODE" == "true" ]]; then
+    defer_text="Defer 5 Minutes   (TEST MODE)"
+    # Also set the variable for later use in case statement
+    DIALOG_DEFER_TEXT_TEST_MODE="$defer_text"
+  else
+    defer_text="${DIALOG_DEFER_TEXT}"
+  fi
   
   if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
     OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT}"
@@ -2519,7 +2525,8 @@ show_prompt() {
       
       reset_deferrals
     ;;
-    "${DIALOG_DEFER_TEXT}")
+    # Handle both normal and test mode defer options
+    "${DIALOG_DEFER_TEXT}" | "${DIALOG_DEFER_TEXT_TEST_MODE}" | "Defer 5 Minutes"* | "Defer 24 Hours"*)
       if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
         log_warn "Maximum deferrals (${MAX_DEFERS}) reached."
         reset_deferrals
@@ -2546,6 +2553,7 @@ show_prompt() {
       else
         newCount=$((deferCount + 1))
         defaults write "${PLIST}" deferCount -int "$newCount"
+        
         if [[ "$TEST_MODE" == "true" ]]; then
           log_info "TEST MODE: Deferred for 5 minutes (${newCount}/${MAX_DEFERS})"
         else

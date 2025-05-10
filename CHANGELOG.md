@@ -4,26 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [1.5.3] - 2025-05-10
 ### Added
+- Comprehensive Test Mode features to streamline development and QA workflows:
 - OS Version Check Test Mode to enable testing on systems already at target OS version
-- New configuration toggle `SKIP_OS_VERSION_CHECK` to enable testing regardless of OS version
-- Quick 5-minute deferrals when in TEST_MODE instead of waiting 24 hours
-- Command-line parameter `--test-os-check` to enable test mode directly when running script
-- Detailed test function `test_os_version_check()` with comprehensive version check logging
+- 5-minute quick deferrals when in TEST_MODE instead of waiting 24 hours
+- Command-line parameter `--test-os-check` to enable test mode directly
+- Custom dialog text showing "Defer 5 Minutes (TEST MODE)" for visual clarity
+- Watchdog-ready flag to ensure proper synchronization before trigger creation
+- Detailed test function `test_os_version_check()` with comprehensive version logging
+- Clear visual indicators and messaging when running in test mode
+- Configuration toggle `SKIP_OS_VERSION_CHECK` to enable testing regardless of OS version
 - Race condition prevention with synchronization between UI helper and watchdog script
-- Watchdog-ready flag to ensure proper initialization before trigger file creation
-- Visual indicators in UI showing when shortened test deferrals are active
 
 ### Changed
 - Modified all OS version check code paths to conditionally bypass based on test mode
-- Updated early OS check, scheduled check, and deferral check to support test mode
-- Enhanced scheduled installation commands to properly handle test mode parameters
+- Updated deferral mechanism to use 5-minute intervals in test mode (24 hours in production)
+- Enhanced scheduling mechanism to detect and prevent race conditions
 - Improved post-installation cleanup to preserve scheduled jobs in test mode
 - Centralized log path handling to ensure consistency across all execution contexts
-- Custom "Defer 5 Minutes" text in dialog when in test mode
+- Expanded error handling in time-related functions with better fallback mechanisms
+- Updated the set_options() function to dynamically select deferral text based on mode
 
 ### Fixed
 - Issue where systems already at target OS couldn't be used for testing upgrade workflows
 - Race condition between helper script and watchdog during scheduled installations
+- Case statement not recognizing test mode deferral option text
 - Inconsistent variable initialization in time validation functions
 - Potential issues with octal interpretation of time values
 - Improved error handling with fallbacks in time-related functions
