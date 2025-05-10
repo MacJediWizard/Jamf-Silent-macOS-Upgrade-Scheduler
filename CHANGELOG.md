@@ -6,10 +6,12 @@ All notable changes to this project will be documented in this file.
 ### Added
 - OS Version Check Test Mode to enable testing on systems already at target OS version
 - New configuration toggle `SKIP_OS_VERSION_CHECK` to enable testing regardless of OS version
+- Quick 5-minute deferrals when in TEST_MODE instead of waiting 24 hours
 - Command-line parameter `--test-os-check` to enable test mode directly when running script
 - Detailed test function `test_os_version_check()` with comprehensive version check logging
 - Race condition prevention with synchronization between UI helper and watchdog script
 - Watchdog-ready flag to ensure proper initialization before trigger file creation
+- Visual indicators in UI showing when shortened test deferrals are active
 
 ### Changed
 - Modified all OS version check code paths to conditionally bypass based on test mode
@@ -17,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Enhanced scheduled installation commands to properly handle test mode parameters
 - Improved post-installation cleanup to preserve scheduled jobs in test mode
 - Centralized log path handling to ensure consistency across all execution contexts
+- Custom "Defer 5 Minutes" text in dialog when in test mode
 
 ### Fixed
 - Issue where systems already at target OS couldn't be used for testing upgrade workflows

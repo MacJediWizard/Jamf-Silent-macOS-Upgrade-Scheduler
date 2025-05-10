@@ -33,7 +33,8 @@
 # CHANGELOG:
 # v1.5.3 - Added OS Version Check Test Mode to bypass version checking for testing
 #         - Added SKIP_OS_VERSION_CHECK toggle in feature settings
-#         - Implemented test_os_version_check() function for detailed version test logging
+#         - Implemented 5-minute quick deferrals when in TEST_MODE instead of 24 hours 
+#         - Added test_os_version_check() function for detailed version test logging
 #         - Updated all OS version check locations to support test mode
 #         - Added command-line --test-os-check parameter support
 #         - Fixed race condition between UI helper and watchdog script
@@ -109,7 +110,7 @@ LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"       # Label for L
 LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"  # Path to LaunchDaemon
 #
 # ---- Feature Toggles ----
-TEST_MODE=true                      # Set to false for production
+TEST_MODE=true                      # Set to false for production (when true, deferrals are shortened to 5 minutes)
 SKIP_OS_VERSION_CHECK=true         # Set to true to skip OS version checking for testing purposes
 AUTO_INSTALL_DEPENDENCIES=true      # Automatically install erase-install and SwiftDialog if missing
 DEBUG_MODE=true                     # Enable detailed logging
@@ -132,6 +133,7 @@ DIALOG_MESSAGEFONT="size=14"                   # Font size for dialog message
 DIALOG_INSTALL_NOW_TEXT="Install Now"          # Text for immediate installation option
 DIALOG_SCHEDULE_TODAY_TEXT="Schedule Today"    # Text for schedule option
 DIALOG_DEFER_TEXT="Defer 24 Hours"             # Text for deferral option
+DIALOG_DEFER_TEXT_TEST_MODE="Defer 5 Minutes\n                (TEST MODE)"  # Text for deferral option in test mode
 DIALOG_CONFIRM_TEXT="Confirm"                  # Button text for confirmation dialogs
 #
 # ---- Pre-installation Dialog ----
@@ -2222,7 +2224,14 @@ show_preinstall() {
 
 # -------------- Prompt Handling --------------
 set_options() {
-  [[ "${DEFERRAL_EXCEEDED}" = true ]] && OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT}" || OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT},${DIALOG_DEFER_TEXT}"
+  local defer_text="${DIALOG_DEFER_TEXT}"
+  [[ "$TEST_MODE" == "true" ]] && defer_text="${DIALOG_DEFER_TEXT_TEST_MODE:-Defer 5 Minutes (Test Mode)}"
+  
+  if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
+    OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT}"
+  else
+    OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT},${defer_text}"
+  fi
 }
 
 generate_time_options() {
@@ -2537,7 +2546,11 @@ show_prompt() {
       else
         newCount=$((deferCount + 1))
         defaults write "${PLIST}" deferCount -int "$newCount"
-        log_info "Deferred (${newCount}/${MAX_DEFERS})"
+        if [[ "$TEST_MODE" == "true" ]]; then
+          log_info "TEST MODE: Deferred for 5 minutes (${newCount}/${MAX_DEFERS})"
+        else
+          log_info "Deferred for 24 hours (${newCount}/${MAX_DEFERS})"
+        fi
         
         # Store current OS version and target OS version
         local current_os=$(sw_vers -productVersion)
@@ -2550,10 +2563,52 @@ show_prompt() {
         log_info "Stored initial OS: $current_os and target OS: $available_version for deferral comparison"
         
         # Get tomorrow's time
-        local defer_hour; defer_hour=$(date -v+24H +%H)
-        local defer_min; defer_min=$(date -v+24H +%M)
-        local defer_day; defer_day=$(date -v+1d +%d)
-        local defer_month; defer_month=$(date -v+1d +%m)
+        if [[ "$TEST_MODE" == "true" ]]; then
+          # Test mode: Schedule for 5 minutes from now for testing
+          log_info "TEST MODE: Using 5-minute deferral instead of 24 hours"
+          
+          # Get current time
+          local current_hour=$(date +%H)
+          local current_min=$(date +%M)
+          
+          # Convert to base-10 integers (handling leading zeros)
+          current_hour=$((10#$current_hour))
+          current_min=$((10#$current_min))
+          
+          # Add 5 minutes
+          current_min=$((current_min + 5))
+          
+          # Handle minute rollover
+          if [[ $current_min -ge 60 ]]; then
+            current_min=$((current_min - 60))
+            current_hour=$((current_hour + 1))
+          fi
+          
+          # Handle hour rollover
+          if [[ $current_hour -ge 24 ]]; then
+            current_hour=$((current_hour - 24))
+            # We need tomorrow's date if hours rolled over
+            defer_day=$(date -v+1d +%d)
+            defer_month=$(date -v+1d +%m)
+          else
+            # Use today's date
+            defer_day=$(date +%d)
+            defer_month=$(date +%m)
+          fi
+          
+          # Format back to strings with leading zeros
+          defer_hour=$(printf "%02d" $current_hour)
+          defer_min=$(printf "%02d" $current_min)
+          
+          log_info "TEST MODE: Scheduling for today/tomorrow at $defer_hour:$defer_min"
+        else
+          # Production mode: Use regular 24-hour deferral
+          log_info "Regular 24-hour deferral mode"
+          local defer_hour; defer_hour=$(date -v+24H +%H)
+          local defer_min; defer_min=$(date -v+24H +%M)
+          local defer_day; defer_day=$(date -v+1d +%d)
+          local defer_month; defer_month=$(date -v+1d +%m)
+        fi
         
         # Ensure clean state
         remove_existing_launchdaemon
@@ -2563,7 +2618,16 @@ show_prompt() {
           # Base-10 conversion only for display
           local display_hour=$((10#${defer_hour}))
           local display_min=$((10#${defer_min}))
-          log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "${display_hour}" "${display_min}")"
+          if [[ "$TEST_MODE" == "true" ]]; then
+            log_info "TEST MODE: Scheduled re-prompt for $defer_hour:$defer_min (in approximately 5 minutes)"
+            
+            # Show a notification to the user if possible
+            if [ -n "$console_user" ] && [ "$console_user" != "root" ] && [ -n "$console_uid" ]; then
+              launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e 'display notification "Due to test mode, the deferral is set for 5 minutes instead of 24 hours." with title "macOS Upgrade - Test Mode"'
+            fi
+          else
+            log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "${display_hour}" "${display_min}")"
+          fi
         else
           log_error "Failed to schedule re-prompt"
           return 1
