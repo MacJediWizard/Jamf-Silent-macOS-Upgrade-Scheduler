@@ -4,7 +4,7 @@ A silent macOS upgrade orchestration wrapper for [Graham Pugh's erase-install](h
 designed for enterprise environments using Jamf Pro or other MDMs.
 
 This script silently pre-caches macOS installers and prompts users only at the final decision point, balancing user flexibility with enforced upgrade deadlines.  
-Now with **automatic dependency installation**, **test mode features**, **snooze functionality**, **login-time installation**, and **comprehensive diagnostics**.
+Now with **automatic dependency installation**, **test mode features**, **pre-authentication notice**, **snooze functionality**, **login-time installation**, and **comprehensive diagnostics**.
 
 ---
 
@@ -12,6 +12,7 @@ Now with **automatic dependency installation**, **test mode features**, **snooze
 
 - 🚀 Silent installer download and caching  
 - 🛡 Minimal user interruption  
+- 🔐 Pre-authentication notice for standard users to prepare for admin prompts
 - ⏳ 24-hour deferral support (up to 3 times)  
 - ⏰ Snooze option for short-term deferrals (1–4 hours)  
 - 🧪 Test mode with quick 5-minute deferrals and OS version check bypass
@@ -66,6 +67,7 @@ This policy should be scheduled to run during business hours or off-peak times, 
 The second policy runs this wrapper script. It handles:
 
 - Prompting the user via SwiftDialog
+- Displaying pre-authentication notice for standard users
 - Tracking deferrals and enforcing upgrade deadlines
 - Scheduling installations for later in the day or next login
 - Initiating immediate upgrades if required
@@ -80,7 +82,7 @@ At the top of the script, these options are configurable:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SCRIPT_VERSION` | Current version of this script | `1.5.3` |
+| `SCRIPT_VERSION` | Current version of this script | `1.5.5` |
 | `INSTALLER_OS` | Target macOS version to upgrade to | `15` |
 | `MAX_DEFERS` | Maximum allowed 24-hour deferrals | `3` |
 | `FORCE_TIMEOUT_SECONDS` | Force install after timeout | `259200` |
@@ -101,6 +103,25 @@ At the top of the script, these options are configurable:
 | `DIALOG_DEFER_TEXT_TEST_MODE` | Text for test mode defer option | `"Defer 5 Minutes (TEST MODE)"` |
 | `DIALOG_ICON` | Dialog icon (SF Symbol or path) | `"SF=gear"` |
 | `DIALOG_POSITION` | Dialog window position on screen | `"topright"` |
+| `SHOW_AUTH_NOTICE` | Enable pre-authentication notice | `true` |
+| `AUTH_NOTICE_TITLE` | Title for auth notice dialog | `"Admin Access Required"` |
+| `AUTH_NOTICE_MESSAGE` | Message for auth notice | `"You will be prompted for admin credentials..."` |
+| `AUTH_NOTICE_BUTTON` | Text for auth notice button | `"I'm Ready to Continue"` |
+| `AUTH_NOTICE_TIMEOUT` | Timeout in seconds (0 = no timeout) | `60` |
+| `AUTH_NOTICE_ICON` | Icon for auth notice dialog | `"SF=lock.shield"` |
+
+---
+
+## Pre-Authentication Notice Feature
+
+To improve user experience in environments where users operate with standard accounts but need temporary admin privileges for installation, version 1.5.5 introduces a pre-authentication notice:
+
+- **User Notification**: Displays a dialog informing users they'll need admin credentials before the actual prompt appears
+- **Preparation Time**: Allows standard users to obtain admin privileges via Jamf Connect or Self Service
+- **Customizable**: Full control over message text, timeout, and appearance
+- **Toggle Control**: Can be disabled in environments where it's not needed
+
+This feature is particularly valuable for organizations using Jamf Connect or Self Service for temporary admin privilege escalation.
 
 ---
 
@@ -126,16 +147,13 @@ These testing features allow you to test the complete workflow without waiting f
 
 ---
 
-## Recent Updates (v1.5.3)
+## Recent Updates (v1.5.5)
 
-- 🧪 Added OS Version Check Test Mode to bypass version checking for testing
-- 🕒 Implemented 5-minute quick deferrals in TEST_MODE instead of 24 hours 
-- 🔄 Added SKIP_OS_VERSION_CHECK toggle and --test-os-check parameter
-- 🔐 Fixed race condition between UI helper and watchdog script with mutex flag
-- 🛡️ Enhanced time validation with better error handling
-- 🧹 Improved post-installation cleanup to preserve test resources
-- 📝 Centralized log path handling for consistent logging
-- 🖼️ Added test-specific dialog text for clear visual indicators in test mode
+- 🔐 Added pre-authentication notice dialog before admin credentials prompt
+- 🛡️ Enhanced user experience for standard users in Jamf Connect environments
+- ⚙️ Added configuration option to enable/disable the notice dialog
+- 📝 Added customizable messaging to guide users on obtaining admin rights
+- 🖼️ Implemented notice in both direct execution and scheduled installation workflows
 
 ---
 
@@ -145,22 +163,27 @@ These testing features allow you to test the complete workflow without waiting f
     - **Installer Caching**: fetches the installer in the background
     - **Wrapper Execution**: manages prompts, deferrals, and scheduling
 2. Customize dialog text and deferral limits at the top of the script
-3. Test using `TEST_MODE=true` and `SKIP_OS_VERSION_CHECK=true` for quick testing
-4. Run with `--test-os-check` parameter for one-time test mode activation
-5. Monitor logs and user deferral history via the preference plist
+3. Configure the pre-authentication notice based on your environment needs
+4. Test using `TEST_MODE=true` and `SKIP_OS_VERSION_CHECK=true` for quick testing
+5. Run with `--test-os-check` parameter for one-time test mode activation
+6. Monitor logs and user deferral history via the preference plist
 
 ---
 
-## Scheduling Options
+## User Experience Flow
 
-The script provides the following user-facing options:
+1. **Initial Prompt**: User is presented with three options:
+   - Install Now: Proceeds immediately to installation
+   - Schedule Today: Lets user select a time later today for installation
+   - Defer 24 Hours: Postpones the installation (up to max deferrals)
 
-- **Install Now** – Start installation immediately  
-- **Schedule Today** – Choose a time later in the day  
-- **Defer 24 Hours** – Postpone installation for one day (max 3 times)  
-- **Defer 5 Minutes** – (Test mode only) Quick deferral for testing purposes
+2. **Pre-Authentication Notice**: Before credentials are requested, users see a dialog explaining they'll need admin access.
 
-Once the deferral limit or 72-hour window is reached, only Install Now and Schedule Today are presented.
+3. **Admin Authentication**: Graham's erase-install script requests admin credentials.
+
+4. **Installation Process**: The macOS upgrade proceeds with user-facing progress indicators.
+
+5. **Scheduled Installation**: If scheduled, the system will display both the pre-authentication notice and a countdown dialog at the scheduled time.
 
 ---
 

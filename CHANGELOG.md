@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## v1.5.5 - Added Pre-Authentication Notice Feature
+
+- Added configurable pre-authentication notice dialog before admin credentials prompt
+- New configuration option to enable/disable the notice dialog
+- Customizable messaging to guide users on obtaining admin rights if needed
+- Enhanced user experience for standard users in Jamf Connect environments
+- Implemented in both direct execution and scheduled installation workflows
+- Added dialog customization options (title, message, button text, timeout, icon)
+- Test mode compatibility with special indicators
+
+---
+
 ## v1.5.4 - Fixed Scheduled Installation Execution
 - Fixed critical issue with scheduled installation not running properly
 - Corrected command construction in watchdog script to properly pass variables 

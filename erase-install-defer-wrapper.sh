@@ -31,6 +31,12 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.5.5 - Added pre-authentication notice dialog for standard users with Jamf Connect
+#         - Feature can be enabled/disabled via SHOW_AUTH_NOTICE configuration
+#         - Customizable dialog to inform users before admin credentials are requested
+#         - Implemented in both direct and scheduled installation workflows
+#         - Added dialog appearance and behavior customization options
+#         - Enhanced user experience for environments using Jamf Connect or Self Service
 # v1.5.4 - Fixed scheduled installation execution issues
 #         - Corrected command construction in watchdog script
 #         - Enhanced variable passing between main script and watchdog script
@@ -70,24 +76,6 @@
 #         - Added lock file mechanism to prevent multiple simultaneous executions
 #         - Improved scheduled installation UI visibility and user context handling
 #         - Added process tracking and enhanced cleanup procedures
-# v1.4.17 - Implemented centralized LaunchDaemon control mechanism, fixed time formatting issues, and improved window behavior
-# v1.4.16 - Fixed printf error with leading zeros by enforcing base-10 interpretation
-# v1.4.15 - Removed --mini flag and adjusted window dimensions for proper display of UI elements
-# v1.4.14 - Added --mini flag to all SwiftDialog commands, implemented proper countdown with auto-continue
-# v1.4.13 - Fixed scheduled installation countdown window, ensured wrapper script is called properly
-# v1.4.12 - Fixed SwiftDialog selection parsing, padded log times, enforced LaunchDaemon unload, deferred flow fix
-# v1.4.11 - Fixed LaunchDaemon creation consistency and improved error handling
-# v1.4.10 - Fixed Bash octal parsing bug when scheduling times like 08:00 or 09:00
-# v1.4.9 - Enhanced logging system with rotation and additional log levels
-# v1.4.8 - Enhanced UI with proper dropdown selections and improved response handling
-# v1.4.7 - Fixed JSON parsing to correctly extract dropdown selections from nested SwiftDialog output
-# v1.4.6 - Switched to dropdown UI with three options (Install Now, Schedule Today, Defer 24 Hours)
-# v1.4.5 - Reverted to multi-button UI: Install Now, Schedule Today, Defer 24 Hours
-# v1.4.4 - Updated logging functions to simplified date expansion syntax
-# v1.4.3 - Switched to dropdown UI with single OK button (then reverted)
-# v1.4.2 - Preserved --mini UI and added debug logging of SwiftDialog exit codes/output
-# v1.4.1 - Fixed syntax in install functions ($(mktemp -d))
-# v1.4.0 - Persistent deferral count across runs and reset when new script version is detected
 #
 ########################################################################################################################################################################
 ########################################################################################################################################################################
@@ -100,7 +88,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.5.4"              # Current version of this script
+SCRIPT_VERSION="1.5.5"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -184,6 +172,16 @@ POWER_WAIT_LIMIT=300               # Wait time in seconds for power connection (
 # to connect power when prompted.
 MIN_DRIVE_SPACE=50                 # Minimum free drive space in GB
 CLEANUP_AFTER_USE=true             # Clean up temp files after use
+#
+# ---- Authentication Notice Configuration ----
+SHOW_AUTH_NOTICE=true                     # Set to false to disable the pre-authentication notice
+AUTH_NOTICE_TITLE="Admin Access Required"  # Title for the authentication notice dialog
+AUTH_NOTICE_MESSAGE="You will be prompted for admin credentials to complete the macOS upgrade.\n\nIf you do not have admin access, please use Jamf Connect or Self Service to elevate your permissions before continuing."  # Message to display
+AUTH_NOTICE_BUTTON="I'm Ready to Continue" # Text for the continue button
+AUTH_NOTICE_TIMEOUT=60                    # Timeout in seconds (0 = no timeout)
+AUTH_NOTICE_ICON="SF=lock.shield"         # Icon (SF Symbol or path to image)
+AUTH_NOTICE_HEIGHT=300                    # Dialog height in pixels
+AUTH_NOTICE_WIDTH=550                     # Dialog width in pixels
 #
 ########################################################################################################################################################################
 
@@ -359,6 +357,60 @@ test_os_version_check() {
   log_info "===== OS VERSION CHECK TEST COMPLETE ====="
   
   # Return true (0) to allow script to continue regardless of actual OS versions
+  return 0
+}
+
+# Function to show pre-authentication notice
+show_auth_notice() {
+  # Skip if disabled
+  if [[ "${SHOW_AUTH_NOTICE}" != "true" ]]; then
+    log_debug "Pre-authentication notice is disabled, skipping"
+    return 0
+  fi
+  
+  log_info "Displaying pre-authentication notice"
+  
+  # Get console user for proper UI handling
+  local console_user=""
+  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  local console_uid
+  console_uid=$(id -u "$console_user" 2>/dev/null || echo "0")
+  
+  # Set UI environment for the console user
+  export DISPLAY=:0
+  if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
+    launchctl asuser "$console_uid" sudo -u "$console_user" defaults write org.swift.SwiftDialog FrontmostApplication -bool true
+  fi
+  
+  # For test mode, use a modified title
+  local display_title="$AUTH_NOTICE_TITLE"
+  [[ "$TEST_MODE" = true ]] && display_title="${AUTH_NOTICE_TITLE} (TEST MODE)"
+  
+  # Prepare timeout parameters
+  local timeout_args=""
+  if [[ $AUTH_NOTICE_TIMEOUT -gt 0 ]]; then
+    timeout_args="--timer $AUTH_NOTICE_TIMEOUT"
+  fi
+  
+  # Display the dialog
+  "$DIALOG_BIN" --title "$display_title" \
+  --message "$AUTH_NOTICE_MESSAGE" \
+  --button1text "$AUTH_NOTICE_BUTTON" \
+  --icon "$AUTH_NOTICE_ICON" \
+  --height $AUTH_NOTICE_HEIGHT \
+  --width $AUTH_NOTICE_WIDTH \
+  --moveable \
+  --position "$DIALOG_POSITION" \
+  $timeout_args
+  
+  local result=$?
+  log_debug "Pre-authentication notice dialog completed with status: $result"
+  
+  # Give user a moment to prepare
+  sleep 2
+  
   return 0
 }
 
@@ -1348,6 +1400,16 @@ CLEANUP_AFTER_USE="${CLEANUP_AFTER_USE}"
 TEST_MODE="${TEST_MODE}"
 DEBUG_MODE="${DEBUG_MODE}"
 
+# Authentication notice variables
+SHOW_AUTH_NOTICE="${SHOW_AUTH_NOTICE}"
+AUTH_NOTICE_TITLE="${AUTH_NOTICE_TITLE}"
+AUTH_NOTICE_MESSAGE="${AUTH_NOTICE_MESSAGE}"
+AUTH_NOTICE_BUTTON="${AUTH_NOTICE_BUTTON}"
+AUTH_NOTICE_ICON="${AUTH_NOTICE_ICON}"
+AUTH_NOTICE_HEIGHT=${AUTH_NOTICE_HEIGHT}
+AUTH_NOTICE_WIDTH=${AUTH_NOTICE_WIDTH}
+DIALOG_PATH="${DIALOG_BIN}"
+
 # Function to create trigger file mutex
 init_trigger_mutex() {
   # Create a flag to indicate watchdog is ready
@@ -1766,6 +1828,23 @@ if [ -f "\$TRIGGER_FILE" ]; then
   # Log the constructed command
   log_message "Executing: \$CMD"
   
+  # Add pre-authentication notice here if enabled
+  if [[ "\${SHOW_AUTH_NOTICE}" == "true" ]]; then
+    log_message "Displaying pre-authentication notice"
+    "\${DIALOG_PATH}" --title "\${AUTH_NOTICE_TITLE}" \
+      --message "\${AUTH_NOTICE_MESSAGE}" \
+      --button1text "\${AUTH_NOTICE_BUTTON}" \
+      --icon "\${AUTH_NOTICE_ICON}" \
+      --height \${AUTH_NOTICE_HEIGHT} \
+      --width \${AUTH_NOTICE_WIDTH} \
+      --moveable \
+      --position "${DIALOG_POSITION}"
+    
+    # Small pause to let user prepare
+    sleep 2
+    log_message "Pre-authentication notice completed, proceeding with installation"
+  fi
+
   # Execute the command with proper error handling
   eval "\$CMD"
   
@@ -2155,6 +2234,9 @@ run_erase_install() {
       done
     fi
   fi
+  
+  # Show authentication notice before starting erase-install
+  show_auth_notice
   
   # Run the installation with proper user context for UI
   log_info "Starting erase-install..."
