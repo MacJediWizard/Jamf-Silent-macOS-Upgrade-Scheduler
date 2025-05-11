@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## v1.5.4 - Fixed Scheduled Installation Execution
+- Fixed critical issue with scheduled installation not running properly
+- Corrected command construction in watchdog script to properly pass variables 
+- Enhanced error handling and logging for scheduled installations
+- Improved variable passing between main script and watchdog script
+- Added more detailed execution logs to help with troubleshooting
+- Added explicit variable declaration at watchdog script creation time
+
+---
+
 ## [1.5.3] - 2025-05-10
 ### Added
 - Comprehensive Test Mode features to streamline development and QA workflows:

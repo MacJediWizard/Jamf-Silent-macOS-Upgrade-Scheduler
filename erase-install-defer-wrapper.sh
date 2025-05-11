@@ -31,6 +31,10 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.5.4 - Fixed scheduled installation execution issues
+#         - Corrected command construction in watchdog script
+#         - Enhanced variable passing between main script and watchdog script
+#         - Improved error handling and logging
 # v1.5.3 - Added comprehensive Test Mode features to streamline development and QA
 #         - Added OS Version Check Test Mode to bypass version checking for testing
 #         - Implemented 5-minute quick deferrals in TEST_MODE instead of 24 hours 
@@ -96,7 +100,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.5.3"              # Current version of this script
+SCRIPT_VERSION="1.5.4"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -172,6 +176,12 @@ REBOOT_DELAY=60                    # Delay in seconds before rebooting
 REINSTALL=true                     # true=reinstall, false=erase and install
 NO_FS=true                         # Skip file system creation
 CHECK_POWER=true                   # Check if on AC power before installing
+POWER_WAIT_LIMIT=300               # Wait time in seconds for power connection (default is 60)
+# IMPORTANT: For laptops with very low battery, you may need to increase this value.
+# This setting controls how long erase-install will wait for AC power to be connected
+# before proceeding with installation. In environments with laptops frequently
+# running on battery, consider increasing this value to give users more time
+# to connect power when prompted.
 MIN_DRIVE_SPACE=50                 # Minimum free drive space in GB
 CLEANUP_AFTER_USE=true             # Clean up temp files after use
 #
@@ -298,6 +308,9 @@ log_system_info() {
   log_system "Current User: $(whoami)"
   log_system "Effective User ID: ${EUID}"
   log_system "Dialog Version: $("${DIALOG_BIN}" --version 2>/dev/null || echo 'Not installed')"
+  # Log power-related settings
+  log_system "Power Check Setting: ${CHECK_POWER}"
+  log_system "Power Wait Limit: ${POWER_WAIT_LIMIT} seconds"
   
   if [ -f "${SCRIPT_PATH}" ]; then
     local erase_install_ver; erase_install_ver=$(grep -m1 -A1 '^# Version of this script' "${SCRIPT_PATH}" | grep -m1 -oE 'version="[^"]+"' | cut -d'"' -f2)
@@ -1323,6 +1336,18 @@ LOG_FILE="/var/log/erase-install-wrapper.watchdog.\${RUN_ID}.log"
 INSTALLER_OS="${INSTALLER_OS}"   # Target OS version to install
 SKIP_OS_VERSION_CHECK="${SKIP_OS_VERSION_CHECK}"   # Flag to skip OS version checks for testing
 
+# Add all the parameters needed for erase-install
+ERASE_INSTALL_PATH="/Library/Management/erase-install/erase-install.sh"
+REBOOT_DELAY="${REBOOT_DELAY}"
+REINSTALL="${REINSTALL}"
+NO_FS="${NO_FS}"
+CHECK_POWER="${CHECK_POWER}"
+POWER_WAIT_LIMIT="${POWER_WAIT_LIMIT}"
+MIN_DRIVE_SPACE="${MIN_DRIVE_SPACE}"
+CLEANUP_AFTER_USE="${CLEANUP_AFTER_USE}"
+TEST_MODE="${TEST_MODE}"
+DEBUG_MODE="${DEBUG_MODE}"
+
 # Function to create trigger file mutex
 init_trigger_mutex() {
   # Create a flag to indicate watchdog is ready
@@ -1542,12 +1567,6 @@ cleanup_watchdog() {
       rm -f "\$DAEMON_PATH"
     fi
     
-    # Remove trigger file if it exists
-    if [ -f "\$TRIGGER_FILE" ]; then
-      log_message "Removing trigger file: \$TRIGGER_FILE"
-      rm -f "\$TRIGGER_FILE"
-    fi
-    
     # Remove helper script if it still exists
     if [ -f "\$HELPER_SCRIPT" ]; then
       log_message "Removing helper script: \$HELPER_SCRIPT"
@@ -1654,7 +1673,9 @@ cleanup_watchdog() {
 # Wait for trigger file to appear
 COUNTER=0
 log_message "Watchdog script started (PID: \$$)"
+log_message "Starting startosinstall plist monitor"
 log_message "Waiting for trigger file: \$TRIGGER_FILE"
+
 while [ ! -f "\$TRIGGER_FILE" ] && [ \$COUNTER -lt \$MAX_WAIT ]; do
   sleep \$SLEEP_INTERVAL
   COUNTER=\$((COUNTER + SLEEP_INTERVAL))
@@ -1682,13 +1703,81 @@ if [ -f "\$TRIGGER_FILE" ]; then
   fi
   
   # OS needs update, proceed with installation
-  log_message "OS needs to be updated. Running erase-install with parameters: --reinstall --rebootdelay ${REBOOT_DELAY} $([ "$NO_FS" = true ] && echo "--no-fs") $([ "$CHECK_POWER" = true ] && echo "--check-power") --min-drive-space ${MIN_DRIVE_SPACE} $([ "$CLEANUP_AFTER_USE" = true ] && echo "--cleanup-after-use") $([ "$TEST_MODE" = true ] && echo "--test-run") $([ "$DEBUG_MODE" = true ] && echo "--verbose")"
+  log_message "OS needs to be updated. Preparing erase-install command..."
   
-  /Library/Management/erase-install/erase-install.sh --reinstall --rebootdelay ${REBOOT_DELAY} $([ "$NO_FS" = true ] && echo "--no-fs") $([ "$CHECK_POWER" = true ] && echo "--check-power") --min-drive-space ${MIN_DRIVE_SPACE} $([ "$CLEANUP_AFTER_USE" = true ] && echo "--cleanup-after-use") $([ "$TEST_MODE" = true ] && echo "--test-run") $([ "$DEBUG_MODE" = true ] && echo "--verbose")
+  # Build command arguments properly - FIX FOR THE EMPTY COMMAND ISSUE
+  CMD="\$ERASE_INSTALL_PATH"
   
-  # Save exit code
+  # Add reinstall parameter
+  if [[ "\$REINSTALL" == "true" ]]; then
+    log_message "Mode: Reinstall (not erase-install)"
+    CMD="\$CMD --reinstall"
+  fi
+  
+  # Add reboot delay if specified
+  if [ "\$REBOOT_DELAY" -gt 0 ]; then
+    log_message "Using reboot delay: \$REBOOT_DELAY seconds"
+    CMD="\$CMD --rebootdelay \$REBOOT_DELAY"
+  fi
+  
+  # Add no filesystem option if enabled
+  if [ "\$NO_FS" = true ]; then
+    log_message "File system check disabled (--no-fs)"
+    CMD="\$CMD --no-fs"
+  fi
+  
+  # Add power check and wait limit if enabled
+  if [ "\$CHECK_POWER" = true ]; then
+    log_message "Power check enabled: erase-install will verify power connection"
+    CMD="\$CMD --check-power"
+    
+    if [ "\$POWER_WAIT_LIMIT" -gt 0 ]; then
+      log_message "Power wait limit set to \$POWER_WAIT_LIMIT seconds"
+      CMD="\$CMD --power-wait-limit \$POWER_WAIT_LIMIT"
+    else
+      log_message "Using default power wait limit (60 seconds)"
+    fi
+  else
+    log_message "Power check disabled: installation will proceed regardless of power status"
+  fi
+  
+  # Add minimum drive space
+  log_message "Minimum drive space: \$MIN_DRIVE_SPACE GB"
+  CMD="\$CMD --min-drive-space \$MIN_DRIVE_SPACE"
+  
+  # Add cleanup option if enabled
+  if [ "\$CLEANUP_AFTER_USE" = true ]; then
+    log_message "Cleanup after use enabled"
+    CMD="\$CMD --cleanup-after-use"
+  fi
+  
+  # Add test mode if enabled
+  if [ "\$TEST_MODE" = true ]; then
+    log_message "Test mode enabled"
+    CMD="\$CMD --test-run"
+  fi
+  
+  # Add verbose logging if debug mode enabled
+  if [ "\$DEBUG_MODE" = true ]; then
+    log_message "Verbose logging enabled for erase-install"
+    CMD="\$CMD --verbose"
+  fi
+  
+  # Log the constructed command
+  log_message "Executing: \$CMD"
+  
+  # Execute the command with proper error handling
+  eval "\$CMD"
+  
+  # Save exit code with enhanced error handling
   RESULT=\$?
   log_message "erase-install completed with exit code: \$RESULT"
+  
+  # Enhanced error logging for power-related issues
+  if [ \$RESULT -ne 0 ] && [ "\$CHECK_POWER" = true ]; then
+    log_message "NOTE: Power checking was enabled with wait limit of \$POWER_WAIT_LIMIT seconds"
+    log_message "If installation failed due to power issues, consider increasing the POWER_WAIT_LIMIT value"
+  fi
   
   # Clean up
   cleanup_watchdog
@@ -2069,36 +2158,86 @@ run_erase_install() {
   
   # Run the installation with proper user context for UI
   log_info "Starting erase-install..."
-  
+    
+  # Special logging for test mode with power checking
+  if [[ "$TEST_MODE" == "true" && "$CHECK_POWER" == "true" ]]; then
+    log_info "TEST MODE: Power checking is enabled with wait limit of $POWER_WAIT_LIMIT seconds"
+    log_info "TEST MODE: Note that even in test mode, erase-install will still check for power"
+    log_info "TEST MODE: If this is not desired for testing, set CHECK_POWER=false in the configuration"
+    
+    # Enhanced visibility in test logs
+    if [[ "$POWER_WAIT_LIMIT" -gt 60 ]]; then
+      log_info "TEST MODE: Current power wait limit ($POWER_WAIT_LIMIT seconds) exceeds 1 minute"
+      log_info "TEST MODE: For faster test cycling, consider temporarily reducing POWER_WAIT_LIMIT in test environments"
+    fi
+  fi
+    
   # Build command with proper options
   local cmd_args=()
   cmd_args+=("${SCRIPT_PATH}")
   
-  # Add options based on configuration variables
-  [[ "$REBOOT_DELAY" -gt 0 ]] && cmd_args+=("--rebootdelay" "$REBOOT_DELAY")
-  [[ "$REINSTALL" == "true" ]] && cmd_args+=("--reinstall")
-  [[ "$NO_FS" == "true" ]] && cmd_args+=("--no-fs")
-  [[ "$CHECK_POWER" == "true" ]] && cmd_args+=("--check-power")
-  cmd_args+=("--min-drive-space" "$MIN_DRIVE_SPACE")
-  [[ "$CLEANUP_AFTER_USE" == "true" ]] && cmd_args+=("--cleanup-after-use")
-  [[ "$TEST_MODE" == "true" ]] && cmd_args+=("--test-run")
-  
-  if [ -z "$console_user" ] || [ "$console_user" = "root" ] || [ "$console_user" = "_mbsetupuser" ]; then
-    log_warn "No valid console user detected. UI interactions may not work correctly."
+  # Add options based on configuration variables with improved logging
+  if [[ "$REBOOT_DELAY" -gt 0 ]]; then
+    cmd_args+=("--rebootdelay" "$REBOOT_DELAY")
+    log_debug "Using reboot delay: $REBOOT_DELAY seconds"
   fi
   
-  # Log the command we're about to run
-  log_info "Running erase-install with args: ${cmd_args[*]}"
+  if [[ "$REINSTALL" == "true" ]]; then
+    cmd_args+=("--reinstall")
+    log_debug "Mode: Reinstall (not erase-install)"
+  fi
   
-  # Set UI environment for the console user
-  export DISPLAY=:0
-  if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
-    launchctl asuser "$console_uid" sudo -u "$console_user" defaults write org.swift.SwiftDialog FrontmostApplication -bool true
+  if [[ "$NO_FS" == "true" ]]; then
+    cmd_args+=("--no-fs")
+    log_debug "File system check disabled (--no-fs)"
+  fi
+  
+  if [[ "$CHECK_POWER" == "true" ]]; then
+    cmd_args+=("--check-power")
+    log_debug "Power check enabled: erase-install will verify power connection"
+    
+    if [[ "$POWER_WAIT_LIMIT" -gt 0 ]]; then
+      cmd_args+=("--power-wait-limit" "$POWER_WAIT_LIMIT")
+      log_debug "Power wait limit set to $POWER_WAIT_LIMIT seconds"
+    else
+      log_debug "Using default power wait limit (60 seconds)"
+    fi
+  else
+    log_debug "Power check disabled: installation will proceed regardless of power status"
+  fi
+  
+  cmd_args+=("--min-drive-space" "$MIN_DRIVE_SPACE")
+  log_debug "Minimum drive space: $MIN_DRIVE_SPACE GB"
+  
+  if [[ "$CLEANUP_AFTER_USE" == "true" ]]; then
+    cmd_args+=("--cleanup-after-use")
+    log_debug "Cleanup after use enabled"
+  fi
+  
+  if [[ "$TEST_MODE" == "true" ]]; then
+    cmd_args+=("--test-run")
+    log_debug "Test mode enabled"
+  fi
+  
+  if [[ "$DEBUG_MODE" == "true" ]]; then
+    cmd_args+=("--verbose")
+    log_debug "Verbose logging enabled for erase-install"
   fi
   
   # Execute with proper error handling
   if ! sudo "${cmd_args[@]}"; then
-    log_error "erase-install command failed"
+    local exit_code=$?
+    log_error "erase-install command failed with exit code: $exit_code"
+    
+    # Enhanced error logging for potential power-related issues
+    if [[ "$CHECK_POWER" == "true" ]]; then
+      log_error "Note: Power checking was enabled with wait limit of $POWER_WAIT_LIMIT seconds"
+      log_error "If installation failed due to power issues, consider:"
+      log_error "1. Increasing POWER_WAIT_LIMIT (currently $POWER_WAIT_LIMIT seconds)"
+      log_error "2. Ensuring the device has reliable power connection before starting"
+      log_error "3. Check erase-install log for power-related messages"
+    fi
+    
     # Add cleanup even on failure
     post_erase_install_cleanup
     return 1
@@ -2660,6 +2799,61 @@ if [[ "$1" == "--test-os-check" ]]; then
   shift  # Remove this argument and continue processing others
 fi
 
+# Check for test power wait option
+if [[ "$1" == "--test-power-wait" ]]; then
+  # Initialize logging first
+  init_logging
+  log_info "Starting power wait limit test mode"
+  log_system_info
+  
+  # Verify power wait limit configuration
+  log_info "===== POWER WAIT LIMIT TEST MODE ====="
+  log_info "Current Power Check setting: CHECK_POWER=${CHECK_POWER}"
+  log_info "Current Power Wait Limit: POWER_WAIT_LIMIT=${POWER_WAIT_LIMIT} seconds"
+  
+  # Add a power status check to the test mode
+  log_info "Checking current system power status..."
+  if system_profiler SPPowerDataType &>/dev/null; then
+    power_info=$(system_profiler SPPowerDataType 2>/dev/null)
+    
+    if echo "$power_info" | grep -q "AC Power: Yes"; then
+      log_info "POWER TEST: System is currently connected to AC power"
+      log_info "POWER TEST: erase-install would proceed immediately with installation"
+    else
+      log_info "POWER TEST: System is currently running on battery power"
+      log_info "POWER TEST: erase-install would wait up to $POWER_WAIT_LIMIT seconds for power connection"
+      
+      # Get battery percentage if available
+      battery_percent=$(echo "$power_info" | grep "State of Charge" | awk '{print $5}' | tr -d '%')
+      if [[ -n "$battery_percent" ]]; then
+        log_info "POWER TEST: Current battery charge level: ${battery_percent}%"
+      fi
+    fi
+    
+    # Log all power information for debugging purposes
+    log_info "POWER TEST: Full power information (for reference):"
+    echo "$power_info" | grep -E 'Power Source|AC Power|State of Charge|Time|Cycle Count' | while IFS= read -r line; do
+      log_info "    $line"
+    done
+  else
+    log_info "POWER TEST: No battery detected. Device is likely a desktop on AC power."
+    log_info "POWER TEST: erase-install would proceed immediately with installation"
+  fi
+  
+  # Show how this would be passed to erase-install
+  log_info "These settings would result in the following parameters to erase-install:"
+  if [[ "$CHECK_POWER" == "true" ]]; then
+    log_info "  --check-power --power-wait-limit ${POWER_WAIT_LIMIT}"
+    log_info "Graham's erase-install script will wait up to ${POWER_WAIT_LIMIT} seconds for power connection"
+  else
+    log_info "  [no power check parameters]"
+    log_info "Graham's erase-install script will NOT check for power connection"
+  fi
+  
+  log_info "===== POWER WAIT LIMIT TEST COMPLETE ====="
+  exit 0
+fi
+
 # First, check for cleanup command option
 if [[ "$1" == "--cleanup" ]]; then
   # Initialize logging first
@@ -2914,7 +3108,7 @@ EOF
   # When running from LaunchDaemon (as root), we can run erase-install directly
   if [[ $EUID -eq 0 ]]; then
     log_info "Running erase-install as root"
-    "${SCRIPT_PATH}" --reinstall --rebootdelay "$REBOOT_DELAY" --no-fs --check-power --min-drive-space "$MIN_DRIVE_SPACE" --cleanup-after-use ${TEST_MODE:+--test-run}
+    "${SCRIPT_PATH}" --reinstall --rebootdelay "$REBOOT_DELAY" --no-fs --check-power [[ "$CHECK_POWER" == "true" ]] && echo "--power-wait-limit $POWER_WAIT_LIMIT" --min-drive-space "$MIN_DRIVE_SPACE" --cleanup-after-use ${TEST_MODE:+--test-run}
   else
     # When running as user, we need to use the normal run_erase_install function
     log_info "Running erase-install via run_erase_install function"
