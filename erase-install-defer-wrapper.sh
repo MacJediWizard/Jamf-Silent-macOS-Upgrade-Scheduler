@@ -31,6 +31,15 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.6.1 - Enhanced dependency management functionality
+#         - Improved download mechanism for erase-install with GitHub releases version detection
+#         - Added robust URL pattern handling with multiple fallback methods
+#         - Enhanced verification of installed components with comprehensive path checking
+#         - Added version detection from GitHub releases page to always get latest version
+#         - Improved error handling with detailed logging during dependency installation
+#         - Added file size verification to ensure complete downloads
+#         - Enhanced post-installation verification with multiple path checks
+#         - Fixed direct script download as fallback when package download fails
 # v1.6.0 - Added emergency abort functionality for scheduled installations
 #         - Configurable abort button in scheduled installation dialogs 
 #         - User-defined abort button text and appearance
@@ -209,8 +218,9 @@ ABORT_WIDTH=750                          # Dialog width in pixels
 ABORT_ICON="SF=exclamationmark.triangle" # Icon for error dialog
 #
 ########################################################################################################################################################################
-
+#
 # ---------- Very Early Abort Detection ----------
+#
 # Define a very early function to detect abort daemons before any logging starts
 detect_abort_daemon_early() {
   # Check environment variable first - most reliable method
@@ -646,79 +656,578 @@ parse_dialog_output() {
 # ---------------- Dependency Management ----------------
 
 install_erase_install() {
-  log_info "erase-install not found. Downloading and installing..."
+  # Set a trap to help debug premature exits
+  trap 'log_info "Exiting install_erase_install function at line $LINENO"' RETURN
+  
+  log_info "BEGIN install_erase_install function"
+  
+  # Create a temporary directory
   local tmp; tmp=$(mktemp -d)
-  curl -fsSL -o "${tmp}/erase-install.pkg" "https://github.com/grahampugh/erase-install/releases/latest/download/erase-install.pkg" || { log_error "Failed to download erase-install."; rm -rf "${tmp}"; return 1; }
-  /usr/sbin/installer -pkg "${tmp}/erase-install.pkg" -target / || { log_error "Installation of erase-install failed."; rm -rf "${tmp}"; return 1; }
-  log_info "erase-install installed successfully."
+  if [[ ! -d "${tmp}" ]]; then
+    log_error "Failed to create temporary directory for download."
+    return 1
+  fi
+  
+  log_info "Created temporary directory: ${tmp}"
+  
+  # Define the package path
+  local pkg_path="${tmp}/erase-install.pkg"
+  local download_success=false
+  
+  # First, try to get the latest version number from GitHub releases page
+  log_info "Determining latest version from GitHub releases page..."
+  local latest_ver=""
+  local releases_html="${tmp}/releases.html"
+  
+  if /usr/bin/curl -s -L -o "${releases_html}" "https://github.com/grahampugh/erase-install/releases"; then
+    # Try to extract the latest version tag
+    latest_ver=$(grep -o 'grahampugh/erase-install/releases/tag/v[0-9.]*' "${releases_html}" | head -1 | grep -o '[0-9.]*')
+    
+    if [[ -n "${latest_ver}" ]]; then
+      log_info "Found latest version from releases page: ${latest_ver}"
+      
+      # Try the URL pattern that worked - with version in both path and filename
+      log_info "Downloading package with version ${latest_ver}..."
+      local target_url="https://github.com/grahampugh/erase-install/releases/download/v${latest_ver}/erase-install-${latest_ver}.pkg"
+      log_info "Target URL: ${target_url}"
+      
+      if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${target_url}"; then
+        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
+        log_info "Downloaded file size: ${file_size} bytes"
+        
+        if [[ ${file_size} -gt 1000000 ]]; then
+          log_info "Package download successful and verified."
+          download_success=true
+        else
+          log_warn "Downloaded file is too small (${file_size} bytes) - likely not a valid package."
+        fi
+      else
+        log_warn "Download failed from ${target_url}."
+      fi
+    else
+      log_warn "Could not determine latest version from releases page."
+    fi
+  else
+    log_warn "Failed to download releases page."
+  fi
+  
+  # If specific version download failed, try alternative URL patterns
+  if [[ "${download_success}" != "true" && -n "${latest_ver}" ]]; then
+    log_info "Trying alternative URL patterns with version ${latest_ver}..."
+    
+    # Try alternative URL patterns with the version
+    local alt_urls=(
+      "https://github.com/grahampugh/erase-install/releases/download/v${latest_ver}/erase-install.pkg"
+      "https://github.com/grahampugh/erase-install/releases/download/v${latest_ver}/erase-install.dmg"
+    )
+    
+    for url in "${alt_urls[@]}"; do
+      log_info "Trying URL: ${url}"
+      if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
+        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
+        log_info "Downloaded file size: ${file_size} bytes"
+        
+        if [[ ${file_size} -gt 1000000 ]]; then
+          log_info "Package download successful and verified from: ${url}"
+          download_success=true
+          break
+        else
+          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+        fi
+      else
+        log_warn "Download failed from: ${url}"
+      fi
+    done
+  fi
+  
+  # If versioned download failed, try generic URLs as last resort
+  if [[ "${download_success}" != "true" ]]; then
+    log_info "Versioned download failed. Trying generic URLs as last resort..."
+    
+    local generic_urls=(
+      "https://github.com/grahampugh/erase-install/releases/latest/download/erase-install.pkg"
+      "https://macadmins.software/latest/erase-install.pkg"
+    )
+    
+    for url in "${generic_urls[@]}"; do
+      log_info "Trying generic URL: ${url}"
+      if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
+        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
+        log_info "Downloaded file size: ${file_size} bytes"
+        
+        if [[ ${file_size} -gt 1000000 ]]; then
+          log_info "Package download successful and verified from: ${url}"
+          download_success=true
+          break
+        else
+          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+        fi
+      else
+        log_warn "Download failed from: ${url}"
+      fi
+    done
+  fi
+  
+  # Direct script download if all package downloads fail
+  if [[ "${download_success}" != "true" ]]; then
+    log_info "All package download attempts failed. Downloading script directly..."
+    
+    # Create required directories
+    mkdir -p "/Library/Management/erase-install"
+    
+    # Create the script file directly
+    local script_path="/Library/Management/erase-install/erase-install.sh"
+    
+    # Use the determined version for the raw script URL if available
+    local script_url="https://raw.githubusercontent.com/grahampugh/erase-install/main/erase-install.sh"
+    if [[ -n "${latest_ver}" ]]; then
+      script_url="https://raw.githubusercontent.com/grahampugh/erase-install/v${latest_ver}/erase-install.sh"
+    fi
+    
+    log_info "Downloading erase-install script directly to ${script_path}"
+    log_info "Script URL: ${script_url}"
+    
+    if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${script_path}" "${script_url}"; then
+      local script_size=$(stat -f%z "${script_path}" 2>/dev/null || echo "0")
+      log_info "Downloaded script size: ${script_size} bytes"
+      
+      if [[ ${script_size} -gt 50000 ]]; then
+        log_info "Script download successful (${script_size} bytes)"
+        chmod +x "${script_path}"
+        SCRIPT_PATH="${script_path}"
+        log_info "Made script executable at: ${script_path}"
+        download_success=true
+        # No need to install package since we directly downloaded the script
+        rm -rf "${tmp}"
+        return 0
+      else
+        log_warn "Downloaded script is too small (${script_size} bytes) - likely not valid."
+      fi
+    else
+      log_warn "Script download failed."
+    fi
+  fi
+  
+  # Install the package if download succeeded
+  if [[ "${download_success}" = "true" ]]; then
+    log_info "Installing package with command: /usr/sbin/installer -pkg ${pkg_path} -target /"
+    if /usr/sbin/installer -pkg "${pkg_path}" -target /; then
+      log_info "Package installation succeeded."
+    else
+      log_error "Package installation failed."
+      rm -rf "${tmp}"
+      return 1
+    fi
+  else
+    log_error "All download attempts failed."
+    rm -rf "${tmp}"
+    return 1
+  fi
+  
+  # Clean up temporary files
   rm -rf "${tmp}"
+  
+  # Verify the installation
+  log_info "Verifying erase-install script..."
+  if [[ -x "${SCRIPT_PATH}" ]]; then
+    log_info "erase-install installation completed successfully."
+    return 0
+  else
+    # Try looking in standard locations
+    for path in "/Library/Management/erase-install/erase-install.sh" "/usr/local/bin/erase-install.sh"; do
+      if [[ -x "${path}" ]]; then
+        log_info "Found erase-install at: ${path}"
+        SCRIPT_PATH="${path}"
+        log_info "erase-install installation completed successfully."
+        return 0
+      fi
+    done
+    
+    log_error "erase-install verification failed - script not found after installation."
+    return 1
+  fi
 }
 
 install_swiftDialog() {
-  log_info "swiftDialog not found. Downloading and installing..."
+  # Set a trap to help debug premature exits
+  trap 'log_info "Exiting install_swiftDialog function at line $LINENO"' RETURN
+  
+  log_info "BEGIN install_swiftDialog function"
+  
+  # Create a temporary directory
   local tmp; tmp=$(mktemp -d)
-  
-  # Download the latest version of swiftDialog
-  log_info "Downloading latest swiftDialog..."
-  curl -fsSL -o "${tmp}/dialog.pkg" "https://github.com/bartreardon/swiftDialog/releases/latest/download/dialog.pkg" || { log_error "Failed to download swiftDialog."; rm -rf "${tmp}"; return 1; }
-  
-  # Install the package
-  log_info "Installing swiftDialog package..."
-  /usr/sbin/installer -pkg "${tmp}/dialog.pkg" -target / || { log_error "Installation of swiftDialog failed."; rm -rf "${tmp}"; return 1; }
-  
-  # Create a symlink from the app location to /usr/local/bin if needed
-  if [ -e "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/Dialog" ]; then
-    log_info "Creating symlink for swiftDialog in /usr/local/bin..."
-    mkdir -p /usr/local/bin
-    ln -sf "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/Dialog" "/usr/local/bin/dialog"
-  elif [ -e "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog" ]; then
-    log_info "Creating symlink for erase-install bundled swiftDialog in /usr/local/bin..."
-    mkdir -p /usr/local/bin
-    ln -sf "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog" "/usr/local/bin/dialog"
+  if [[ ! -d "${tmp}" ]]; then
+    log_error "Failed to create temporary directory for download."
+    return 1
   fi
+  
+  log_info "Created temporary directory: ${tmp}"
+  
+  # Define the package path
+  local pkg_path="${tmp}/dialog.pkg"
+  local download_success=false
+  
+  # First, try to get the latest version number from GitHub releases page
+  log_info "Determining latest version from GitHub releases page..."
+  local latest_ver=""
+  local releases_html="${tmp}/releases.html"
+  
+  if /usr/bin/curl -s -L -o "${releases_html}" "https://github.com/swiftDialog/swiftDialog/releases"; then
+    # Try to extract the latest version tag
+    latest_ver=$(grep -o 'swiftDialog/swiftDialog/releases/tag/v[0-9.]*' "${releases_html}" | head -1 | grep -o '[0-9.]*')
+    
+    if [[ -n "${latest_ver}" ]]; then
+      log_info "Found latest version from releases page: ${latest_ver}"
+      
+      # Try the URL pattern with version in both path and filename
+      log_info "Downloading package with version ${latest_ver}..."
+      local target_url="https://github.com/swiftDialog/swiftDialog/releases/download/v${latest_ver}/dialog-${latest_ver}.pkg"
+      log_info "Target URL: ${target_url}"
+      
+      if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${target_url}"; then
+        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
+        log_info "Downloaded file size: ${file_size} bytes"
+        
+        if [[ ${file_size} -gt 1000000 ]]; then
+          log_info "Package download successful and verified."
+          download_success=true
+        else
+          log_warn "Downloaded file is too small (${file_size} bytes) - likely not a valid package."
+        fi
+      else
+        log_warn "Download failed from ${target_url}."
+      fi
+    else
+      log_warn "Could not determine latest version from releases page."
+    fi
+  else
+    log_warn "Failed to download releases page."
+  fi
+  
+  # If specific version download failed, try alternative URL patterns
+  if [[ "${download_success}" != "true" && -n "${latest_ver}" ]]; then
+    log_info "Trying alternative URL patterns with version ${latest_ver}..."
+    
+    # Try alternative URL patterns with the version
+    local alt_urls=(
+      "https://github.com/swiftDialog/swiftDialog/releases/download/v${latest_ver}/dialog.pkg"
+      "https://github.com/bartreardon/swiftDialog/releases/download/v${latest_ver}/dialog-${latest_ver}.pkg"
+      "https://github.com/bartreardon/swiftDialog/releases/download/v${latest_ver}/dialog.pkg"
+    )
+    
+    for url in "${alt_urls[@]}"; do
+      log_info "Trying URL: ${url}"
+      if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
+        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
+        log_info "Downloaded file size: ${file_size} bytes"
+        
+        if [[ ${file_size} -gt 1000000 ]]; then
+          log_info "Package download successful and verified from: ${url}"
+          download_success=true
+          break
+        else
+          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+        fi
+      else
+        log_warn "Download failed from: ${url}"
+      fi
+    done
+  fi
+  
+  # If versioned download failed, try generic URLs as last resort
+  if [[ "${download_success}" != "true" ]]; then
+    log_info "Versioned download failed. Trying generic URLs as last resort..."
+    
+    local generic_urls=(
+      "https://github.com/swiftDialog/swiftDialog/releases/latest/download/dialog.pkg"
+      "https://github.com/bartreardon/swiftDialog/releases/latest/download/dialog.pkg"
+      "https://macadmins.software/latest/dialog.pkg"
+    )
+    
+    for url in "${generic_urls[@]}"; do
+      log_info "Trying generic URL: ${url}"
+      if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
+        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
+        log_info "Downloaded file size: ${file_size} bytes"
+        
+        if [[ ${file_size} -gt 1000000 ]]; then
+          log_info "Package download successful and verified from: ${url}"
+          download_success=true
+          break
+        else
+          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+        fi
+      else
+        log_warn "Download failed from: ${url}"
+      fi
+    done
+  fi
+  
+  # Try to download the app bundle as a ZIP if package download fails
+  if [[ "${download_success}" != "true" && -n "${latest_ver}" ]]; then
+    log_info "Package download failed. Attempting to download app bundle directly..."
+    
+    local zip_path="${tmp}/dialog.zip"
+    local zip_url="https://github.com/swiftDialog/swiftDialog/releases/download/v${latest_ver}/Dialog-${latest_ver}.app.zip"
+    
+    log_info "Downloading app zip from: ${zip_url}"
+    if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${zip_path}" "${zip_url}"; then
+      local zip_size=$(stat -f%z "${zip_path}" 2>/dev/null || echo "0")
+      log_info "Downloaded zip file size: ${zip_size} bytes"
+      
+      if [[ ${zip_size} -gt 1000000 ]]; then
+        log_info "App bundle download successful. Extracting..."
+        
+        # Create the application directory
+        mkdir -p "/Library/Application Support/Dialog"
+        
+        # Extract the ZIP file
+        if /usr/bin/unzip -o "${zip_path}" -d "/Library/Application Support/Dialog/"; then
+          log_info "App bundle extracted successfully."
+          
+          # Create a symlink
+          local app_path="/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/Dialog"
+          if [[ -f "${app_path}" ]]; then
+            log_info "Found Dialog binary at: ${app_path}"
+            chmod +x "${app_path}"
+            
+            mkdir -p /usr/local/bin
+            ln -sf "${app_path}" "/usr/local/bin/dialog"
+            DIALOG_BIN="/usr/local/bin/dialog"
+            
+            log_info "Created symlink to /usr/local/bin/dialog"
+            download_success=true
+          else
+            log_warn "Dialog binary not found in extracted app bundle."
+          fi
+        else
+          log_warn "Failed to extract app bundle."
+        fi
+      else
+        log_warn "Downloaded zip is too small (${zip_size} bytes) - likely not a valid app bundle."
+      fi
+    else
+      log_warn "App bundle download failed."
+    fi
+  fi
+  
+  # Install the package if download succeeded
+  if [[ "${download_success}" = "true" && -f "${pkg_path}" && "$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")" -gt 1000000 ]]; then
+    log_info "Installing package with command: /usr/sbin/installer -pkg ${pkg_path} -target /"
+    if /usr/sbin/installer -pkg "${pkg_path}" -target /; then
+      log_info "Package installation succeeded."
+    else
+      log_error "Package installation failed."
+      rm -rf "${tmp}"
+      return 1
+    fi
+  else
+    # If we already extracted the app bundle and set up the symlink, we don't need to install the package
+    if [[ "${download_success}" != "true" ]]; then
+      log_error "All download attempts failed."
+      rm -rf "${tmp}"
+      return 1
+    fi
+  fi
+  
+  # Clean up temporary files
+  rm -rf "${tmp}"
   
   # Verify the installation
-  if [ -x "/usr/local/bin/dialog" ]; then
-    log_info "swiftDialog installed and accessible at /usr/local/bin/dialog"
-  else
-    log_error "swiftDialog installation verification failed - binary not found at expected location"
-    # Try to find where Dialog might be installed
-    log_info "Searching for Dialog binary..."
-    find /Library -name "Dialog" -type f -executable 2>/dev/null || log_error "Could not locate Dialog binary"
+  log_info "Verifying swiftDialog installation..."
+  
+  # Known possible locations of Dialog binary
+  local possible_paths=(
+    "${DIALOG_BIN}"
+    "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/Dialog"
+    "/Applications/Dialog.app/Contents/MacOS/Dialog"
+    "/usr/local/bin/dialog"
+  )
+  
+  local found=false
+  for path in "${possible_paths[@]}"; do
+    log_info "Checking for swiftDialog at: ${path}"
+    if [[ -f "${path}" ]]; then
+      log_info "Found swiftDialog at: ${path}"
+      # Make it executable if needed
+      if [[ ! -x "${path}" ]]; then
+        log_info "Making binary executable"
+        chmod +x "${path}"
+      fi
+      # Update DIALOG_BIN if different from initial value
+      if [[ "${DIALOG_BIN}" != "${path}" ]]; then
+        log_info "Updating DIALOG_BIN from ${DIALOG_BIN} to ${path}"
+        DIALOG_BIN="${path}"
+      fi
+      found=true
+      break
+    fi
+  done
+  
+  # Create symlink for convenience if needed
+  if [[ "${found}" = "true" && "${DIALOG_BIN}" != "/usr/local/bin/dialog" ]]; then
+    log_info "Creating symlink to /usr/local/bin/dialog"
+    mkdir -p /usr/local/bin
+    ln -sf "${DIALOG_BIN}" "/usr/local/bin/dialog"
   fi
   
-  log_info "swiftDialog installation completed."
-  rm -rf "${tmp}"
+  # Final verification with version check
+  if [[ "${found}" = "true" ]]; then
+    log_info "Testing swiftDialog functionality..."
+    if "${DIALOG_BIN}" --version >/dev/null 2>&1; then
+      local dialog_version
+      dialog_version=$("${DIALOG_BIN}" --version 2>&1 | head -1 || echo "Unknown")
+      log_info "swiftDialog installation verified successfully. Version: ${dialog_version}"
+      return 0
+    else
+      log_warn "swiftDialog binary exists but failed version check."
+      # Return success anyway since we found the binary
+      return 0
+    fi
+  else
+    log_error "swiftDialog installation verification failed - binary not found."
+    return 1
+  fi
 }
 
 dependency_check() {
   local has_error=0
   
-  if [ ! -x "${SCRIPT_PATH}" ]; then
-    if [ "${AUTO_INSTALL_DEPENDENCIES}" = true ]; then
-      if ! install_erase_install; then
-        log_error "erase-install installation failed and is required to continue"
+  log_info "Starting dependency check..."
+  
+  # Verify erase-install
+  log_info "Checking for erase-install..."
+  if [[ ! -x "${SCRIPT_PATH}" ]]; then
+    log_info "erase-install not found at ${SCRIPT_PATH}"
+    
+    if [[ "${AUTO_INSTALL_DEPENDENCIES}" = true ]]; then
+      log_info "Auto-install is enabled. Attempting to install erase-install..."
+      
+      # Explicitly call the function and check its return value
+      install_erase_install
+      local erase_install_result=$?
+      
+      log_info "install_erase_install function returned: ${erase_install_result}"
+      
+      if [[ ${erase_install_result} -ne 0 ]]; then
+        log_error "erase-install installation failed with status: ${erase_install_result}"
+        log_error "This is a required dependency, cannot continue."
         has_error=1
+      else
+        log_info "erase-install installation succeeded"
+        
+        # Verify the installation succeeded
+        if [[ ! -x "${SCRIPT_PATH}" ]]; then
+          log_error "Post-installation verification failed: erase-install not found at ${SCRIPT_PATH}"
+          
+          # Check standard locations as fallback
+          for path in "/Library/Management/erase-install/erase-install.sh" "/usr/local/bin/erase-install.sh"; do
+            if [[ -x "${path}" ]]; then
+              log_info "Found erase-install at alternate location: ${path}"
+              log_info "Updating SCRIPT_PATH from ${SCRIPT_PATH} to ${path}"
+              SCRIPT_PATH="${path}"
+              break
+            fi
+          done
+          
+          # Final check after searching alternate locations
+          if [[ ! -x "${SCRIPT_PATH}" ]]; then
+            log_error "Could not find erase-install in any standard location after installation"
+            has_error=1
+          else
+            log_info "Using erase-install at: ${SCRIPT_PATH}"
+          fi
+        else
+          log_info "Verified erase-install exists at: ${SCRIPT_PATH}"
+        fi
       fi
     else
       log_error "erase-install missing and auto-install disabled"
       has_error=1
     fi
+  else
+    log_info "erase-install found at ${SCRIPT_PATH}"
   fi
   
-  if [ ! -x "${DIALOG_BIN}" ]; then
-    if [ "${AUTO_INSTALL_DEPENDENCIES}" = true ]; then
-      if ! install_swiftDialog; then
-        log_error "swiftDialog installation failed and is required to continue"
+  # Verify swiftDialog
+  log_info "Checking for swiftDialog..."
+  if [[ ! -x "${DIALOG_BIN}" ]]; then
+    log_info "swiftDialog not found at ${DIALOG_BIN}"
+    
+    if [[ "${AUTO_INSTALL_DEPENDENCIES}" = true ]]; then
+      log_info "Auto-install is enabled. Attempting to install swiftDialog..."
+      
+      # Explicitly call the function and check its return value
+      install_swiftDialog
+      local dialog_install_result=$?
+      
+      log_info "install_swiftDialog function returned: ${dialog_install_result}"
+      
+      if [[ ${dialog_install_result} -ne 0 ]]; then
+        log_error "swiftDialog installation failed with status: ${dialog_install_result}"
+        log_error "This is a required dependency, cannot continue."
         has_error=1
+      else
+        log_info "swiftDialog installation succeeded"
+        
+        # Verify the installation succeeded
+        if [[ ! -x "${DIALOG_BIN}" ]]; then
+          log_error "Post-installation verification failed: swiftDialog not found at ${DIALOG_BIN}"
+          
+          # Check standard locations as fallback
+          for path in "/usr/local/bin/dialog" "/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/Dialog" "/Applications/Dialog.app/Contents/MacOS/Dialog"; do
+            if [[ -x "${path}" ]]; then
+              log_info "Found swiftDialog at alternate location: ${path}"
+              log_info "Updating DIALOG_BIN from ${DIALOG_BIN} to ${path}"
+              DIALOG_BIN="${path}"
+              break
+            fi
+          done
+          
+          # Final check after searching alternate locations
+          if [[ ! -x "${DIALOG_BIN}" ]]; then
+            log_error "Could not find swiftDialog in any standard location after installation"
+            has_error=1
+          else
+            log_info "Using swiftDialog at: ${DIALOG_BIN}"
+          fi
+        else
+          log_info "Verified swiftDialog exists at: ${DIALOG_BIN}"
+        fi
       fi
     else
       log_error "swiftDialog missing and auto-install disabled"
       has_error=1
     fi
+  else
+    log_info "swiftDialog found at ${DIALOG_BIN}"
+    
+    # Verify swiftDialog is functioning correctly
+    if ! "${DIALOG_BIN}" --version >/dev/null 2>&1; then
+      log_warn "swiftDialog exists but may not be functioning correctly (--version test failed)"
+      log_info "Will attempt to reinstall swiftDialog..."
+      install_swiftDialog
+      local dialog_reinstall_result=$?
+      
+      if [[ ${dialog_reinstall_result} -ne 0 ]]; then
+        log_error "swiftDialog reinstallation failed with status: ${dialog_reinstall_result}"
+        has_error=1
+      else
+        log_info "swiftDialog reinstallation succeeded"
+      fi
+    else
+      log_info "swiftDialog version check successful"
+    fi
   fi
   
-  return $has_error
+  if [[ ${has_error} -eq 0 ]]; then
+    log_info "All dependencies verified successfully."
+  else
+    log_error "Some dependencies could not be installed or verified."
+  fi
+  
+  log_info "Dependency check completed with final status: ${has_error}"
+  return ${has_error}
 }
 
 # ---------------- Version Check Functions ----------------

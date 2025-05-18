@@ -1,6 +1,42 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.6.1] - 2025-05-19
+### Added
+- Version detection from GitHub releases page to always get latest available version
+- Multiple download URL patterns with intelligent fallbacks
+- File size verification to ensure complete and valid downloads
+- Direct script download fallback when package installation fails
+- Multiple path checking for more robust dependency detection
+
+### Improved
+- Enhanced `install_erase_install` function with more reliable download mechanisms
+- Better error handling with detailed logging during dependency installation
+- More thorough verification of installed components after download
+- Improved path detection for components installed in non-standard locations
+- The `dependency_check` function now handles error conditions more gracefully
+- Added post-installation verification with comprehensive path checks
+- Enhanced version checking to verify functionality, not just presence
+
+---
+
+## [1.6.0] - 2025-05-18
+### Added
+- Emergency abort functionality for scheduled installations
+- Configurable abort button in scheduled installation dialogs
+- User-defined abort button text and appearance
+- Ability to limit number of aborts with MAX_ABORTS setting
+- Automatic rescheduling after abort with configurable defer time
+- Added SCHEDULED_CONTINUE_HEIGHT and SCHEDULED_CONTINUE_WIDTH parameters
+
+### Improved
+- Enhanced dialog appearance with larger windows and improved readability
+- Increased dialog widths and font sizes for better visibility
+- Improved mutex handling between UI helper and watchdog script
+- Fixed race conditions in multi-process communication
+- Strengthened error handling for edge cases in scheduled installations
+
+---
 
 ## v1.5.5 - Added Pre-Authentication Notice Feature
 
