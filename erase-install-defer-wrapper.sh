@@ -113,9 +113,9 @@ LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"       # Label for L
 LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"  # Path to LaunchDaemon
 #
 # ---- Feature Toggles ----
-TEST_MODE=false                      # Set to false for production (when true, deferrals are shortened to 5 minutes)
-PREVENT_ALL_REBOOTS=false            # SAFETY FEATURE: Set to true to prevent any reboots during testing
-SKIP_OS_VERSION_CHECK=false         # Set to true to skip OS version checking for testing purposes
+TEST_MODE=true                      # Set to false for production (when true, deferrals are shortened to 5 minutes)
+PREVENT_ALL_REBOOTS=true            # SAFETY FEATURE: Set to true to prevent any reboots during testing
+SKIP_OS_VERSION_CHECK=true         # Set to true to skip OS version checking for testing purposes
 AUTO_INSTALL_DEPENDENCIES=true      # Automatically install erase-install and SwiftDialog if missing
 DEBUG_MODE=true                     # Enable detailed logging
 #
@@ -201,7 +201,7 @@ AUTH_NOTICE_WIDTH=750                     # Dialog width in pixels
 # ---- Abort Button Configuration ----
 ENABLE_ABORT_BUTTON=true                 # Enable/disable abort button in scheduled dialogs
 ABORT_BUTTON_TEXT="Abort (Emergency)"    # Text for abort button
-ABORT_DEFER_MINUTES=60                    # Minutes to defer when abort is used
+ABORT_DEFER_MINUTES=5                    # Minutes to defer when abort is used
 MAX_ABORTS=3                             # Maximum number of abort actions allowed
 ABORT_COUNTDOWN=15                      # Seconds to wait before abort takes effect
 ABORT_HEIGHT=250                         # Dialog height in pixels
