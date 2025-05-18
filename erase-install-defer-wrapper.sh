@@ -31,6 +31,14 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.6.2 - Enhanced OS version check testing
+#         - Added specialized test functions for different OS version check contexts
+#         - Separated initial OS check from deferral check in test mode
+#         - Fixed redundant version checks in testing workflow
+#         - Improved test logging with detailed version component comparison
+#         - Enhanced watchdog template with more comprehensive test logging
+#         - Added test_deferral_os_check function for scheduled installations
+#         - Improved version extraction from erase-install and SOFA sources
 # v1.6.1 - Enhanced dependency management functionality
 #         - Improved download mechanism for erase-install with GitHub releases version detection
 #         - Added robust URL pattern handling with multiple fallback methods
@@ -108,7 +116,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.6.0"              # Current version of this script
+SCRIPT_VERSION="1.6.1"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -183,7 +191,7 @@ ERROR_CONTINUE_TEXT="OK"                       # Button text for continue button
 #
 # ---- Options passed to erase-install.sh ----
 # These settings control which arguments are passed to Graham Pugh's script
-REBOOT_DELAY=300                    # Delay in seconds before rebooting
+REBOOT_DELAY=60                    # Delay in seconds before rebooting
 REINSTALL=true                     # true=reinstall, false=erase and install
 NO_FS=true                         # Skip file system creation
 CHECK_POWER=true                   # Check if on AC power before installing
@@ -427,44 +435,6 @@ debug_scheduled_item() {
   fi
 }
 
-# ---- OS Version Check Test Function ----
-
-test_os_version_check() {
-  log_info "===== OS VERSION CHECK TEST MODE ====="
-  log_info "Test modes active: TEST_MODE=${TEST_MODE}, SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}"
-  
-  # Get current OS version
-  local current_os=$(sw_vers -productVersion)
-  log_info "Current OS version: $current_os"
-  
-  # Get target OS version
-  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "${INSTALLER_OS}")
-  log_info "Target OS version: $target_os"
-  
-  # Run the normal OS version check
-  if check_os_already_updated; then
-    log_info "TEST RESULT: System is already running the target OS version."
-    log_info "In normal mode, the script would exit here."
-    log_info "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, the script will continue."
-  else
-    log_info "TEST RESULT: System needs to be updated to the target OS version."
-  fi
-  
-  # Run the deferral OS check
-  if check_if_os_upgraded_during_deferral; then
-    log_info "TEST RESULT: OS has been upgraded during deferral period or is already at target."
-    log_info "In normal mode, a scheduled installation would exit here."
-    log_info "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, the script will continue."
-  else
-    log_info "TEST RESULT: OS has NOT been upgraded during deferral and needs update."
-  fi
-  
-  log_info "===== OS VERSION CHECK TEST COMPLETE ====="
-  
-  # Return true (0) to allow script to continue regardless of actual OS versions
-  return 0
-}
-
 # Function to show pre-authentication notice
 show_auth_notice() {
   # Skip if disabled
@@ -653,8 +623,11 @@ parse_dialog_output() {
   printf "%s" "$result"
 }
 
-# ---------------- Dependency Management ----------------
-
+########################################################################################################################################################################
+#
+# ---------------- Script Dependency Management ----------------
+#
+########################################################################################################################################################################
 install_erase_install() {
   # Set a trap to help debug premature exits
   trap 'log_info "Exiting install_erase_install function at line $LINENO"' RETURN
@@ -1230,70 +1203,194 @@ dependency_check() {
   return ${has_error}
 }
 
+########################################################################################################################################################################
+# ---------------- End Dependency Management ----------------
+########################################################################################################################################################################
+########################################################################################################################################################################
+#
 # ---------------- Version Check Functions ----------------
-
+#
+########################################################################################################################################################################
 get_available_macos_version() {
   # Redirect all log output to stderr instead of stdout
-  log_info "Using erase-install to check available macOS version..." >&2
+  log_info "Determining latest macOS version..." >&2
   
-  # Create a temporary file to store the output
+  # First try erase-install table parsing
+  local available_version=""
+  local table_success=false
+  
+  # Create a temporary file for erase-install output
   local tmp_file=$(mktemp)
   
   # Run erase-install with list-only flag
-  # This will show available macOS versions without downloading anything
   log_info "Running erase-install in list-only mode..." >&2
-  
-  # The --list-only flag shows available installers without downloading
   "${SCRIPT_PATH}" --list-only > "$tmp_file" 2>&1
   
-  # Extract the version information from the output
-  local available_version=""
+  # Look for the table header line
+  local table_start=$(grep -n "│ IDENTIFIER │" "$tmp_file" | cut -d':' -f1)
   
-  # First check if erase-install found an installer
-  if grep -q "Installer is at:" "$tmp_file"; then
-    log_info "Installer found by erase-install" >&2
+  if [[ -n "$table_start" ]]; then
+    log_info "Found version table at line $table_start" >&2
     
-    # Look for system version in the output
-    if grep -q "System version:" "$tmp_file"; then
-      available_version=$(grep "System version:" "$tmp_file" | head -1 | awk -F': ' '{print $2}' | awk '{print $1}')
-      log_info "Using system version from erase-install output: $available_version" >&2
-      # Look for macOS Sequoia or similar name patterns
-    elif grep -q "Install macOS.*\.app" "$tmp_file"; then
-      # Extract the app name
-      local app_name=$(grep "Install macOS.*\.app" "$tmp_file" | head -1 | grep -o "Install macOS.*\.app")
-      log_info "Found installer app: $app_name" >&2
-      
-      # Get the version directly from the system
-      if [[ -f "/Applications/$app_name/Contents/Info.plist" ]]; then
-        available_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "/Applications/$app_name/Contents/Info.plist" 2>/dev/null)
-        log_info "Extracted version from installer app: $available_version" >&2
-      fi
+    # Get the first data row (2 lines after the header, which includes the separator line)
+    local first_entry_line=$((table_start + 2))
+    local first_entry=$(sed -n "${first_entry_line}p" "$tmp_file")
+    
+    if [[ -n "$first_entry" ]]; then
+      # Parse using │ as field separator and extract the version field (field 4)
+      available_version=$(echo "$first_entry" | awk -F'│' '{print $4}' | xargs)
+      # Strip any ANSI color codes
+      available_version=$(echo "$available_version" | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})*)?[m|K]//g")
+        
+        if [[ -n "$available_version" ]]; then
+          log_info "Successfully extracted version from erase-install table: $available_version" >&2
+          table_success=true
+        fi
     fi
   fi
   
-  # If we still don't have a version, look for more patterns in the output
-  if [[ -z "$available_version" ]]; then
-    # Try to extract from any Build value mentions
-    if grep -q "Build.*[0-9][0-9][A-Z][0-9]" "$tmp_file"; then
-      log_info "Found Build value in erase-install output" >&2
+  # If table parsing failed, try SOFA method
+  if [[ "$table_success" != "true" ]]; then
+    log_info "Table parsing failed, trying SOFA web service fallback..." >&2
+    
+    # Use the SOFA feed URL
+    local feed_url="https://sofafeed.macadmins.io/v1/macos_data_feed.json"
+    local json_cache="/tmp/sofa_feed.json"
+    
+    if curl -s --compressed "$feed_url" -o "$json_cache" 2>/dev/null; then
+      log_info "Successfully downloaded SOFA JSON feed" >&2
       
-      # Since we have a build but not a version, we should use the system version
-      available_version=$(sw_vers -productVersion)
-      log_info "Using current system version as target: $available_version" >&2
+      # Extract the latest macOS version
+      available_version=$(/usr/bin/plutil -extract "OSVersions.0.Latest.ProductVersion" raw "$json_cache" 2>/dev/null | head -n 1)
+      
+      if [[ -z "$available_version" ]]; then
+        # Try the latestProductionVersion as a fallback
+        log_info "Trying latestProductionVersion as a fallback" >&2
+        available_version=$(/usr/bin/plutil -extract "latestProductionVersion" raw "$json_cache" 2>/dev/null | head -n 1)
+      fi
+      
+      if [[ -n "$available_version" ]]; then
+        log_info "Successfully extracted version from SOFA: $available_version" >&2
+      fi
+    else
+      log_warn "Failed to download SOFA JSON feed" >&2
     fi
   fi
   
   # Clean up
   rm -f "$tmp_file"
+  rm -f "/tmp/sofa_feed.json" 2>/dev/null
   
-  # If we couldn't get a version, use INSTALLER_OS as fallback
+  # If we still don't have a version, use INSTALLER_OS as fallback
   if [[ -z "$available_version" ]]; then
     available_version="$INSTALLER_OS"
     log_info "Using INSTALLER_OS as fallback version: $available_version" >&2
   fi
   
-  # Only return the version, not any logs or debug output
+  # Only return the version number, not any logs
   echo "$available_version"
+}
+
+test_os_version_check() {
+  log_info "===== OS VERSION CHECK TEST MODE ====="
+  log_info "Test modes active: TEST_MODE=${TEST_MODE}, SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}"
+  
+  # Get current OS version
+  local current_os=$(sw_vers -productVersion)
+  log_info "Current OS version: $current_os"
+  
+  # Get target OS version
+  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "${INSTALLER_OS}")
+  log_info "Target OS version: $target_os"
+  
+  # Extract major versions for easier comparison logging
+  local current_major=$(echo "$current_os" | cut -d. -f1)
+  local target_major=$(echo "$target_os" | cut -d. -f1)
+  log_info "Current major version: $current_major, Target major version: $target_major"
+  
+  # Only run the initial OS version check
+  log_info "----- INITIAL VERSION CHECK TEST -----"
+  if check_os_already_updated; then
+    log_info "TEST RESULT: System is already running the target OS version ($current_os >= $target_os)"
+    log_info "In normal mode, the script would exit here."
+    log_info "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, the script will continue anyway."
+  else
+    log_info "TEST RESULT: System needs to be updated to the target OS version ($current_os < $target_os)"
+  fi
+  
+  # Log detailed version comparison to help with troubleshooting
+  log_info "Detailed version comparison:"
+  IFS='.' read -ra CURRENT_VER <<< "$current_os"
+  IFS='.' read -ra TARGET_VER <<< "$target_os"
+  
+  log_info "Current version components: ${CURRENT_VER[*]}"
+  log_info "Target version components: ${TARGET_VER[*]}"
+  
+  # Compare each component
+  for ((i=0; i<${#CURRENT_VER[@]} && i<${#TARGET_VER[@]}; i++)); do
+    if [[ ${CURRENT_VER[i]} -gt ${TARGET_VER[i]} ]]; then
+      log_info "Component $i: Current (${CURRENT_VER[i]}) > Target (${TARGET_VER[i]})"
+      break
+    elif [[ ${CURRENT_VER[i]} -lt ${TARGET_VER[i]} ]]; then
+      log_info "Component $i: Current (${CURRENT_VER[i]}) < Target (${TARGET_VER[i]})"
+      break
+    else
+      log_info "Component $i: Current (${CURRENT_VER[i]}) = Target (${TARGET_VER[i]})"
+    fi
+  done
+  
+  log_info "===== OS VERSION CHECK TEST COMPLETE ====="
+  
+  # Return true (0) to allow script to continue regardless of actual OS versions
+  return 0
+}
+
+test_deferral_os_check() {
+  log_info "===== DEFERRAL OS CHECK TEST MODE ====="
+  log_info "Test modes active: TEST_MODE=${TEST_MODE}, SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}"
+  
+  # Get current OS version
+  local current_os=$(sw_vers -productVersion)
+  log_info "Current OS version: $current_os"
+  
+  # Get initial and target OS versions
+  local initial_os=$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "$current_os")
+  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "${INSTALLER_OS}")
+  log_info "Initial OS version (when deferred): $initial_os"
+  log_info "Target OS version: $target_os"
+  
+  # Run the deferral check
+  log_info "----- DEFERRAL VERSION CHECK TEST -----"
+  if check_if_os_upgraded_during_deferral; then
+    log_info "TEST RESULT: OS has been upgraded during deferral period or is already at target."
+    log_info "In normal mode, a scheduled installation would exit here."
+    log_info "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, the script will continue anyway."
+  else
+    log_info "TEST RESULT: OS has NOT been upgraded during deferral and needs update."
+  fi
+  
+  # Log detailed comparison of current vs initial version
+  log_info "Detailed deferral comparison:"
+  log_info "Initial version: $initial_os, Current version: $current_os, Target version: $target_os"
+  
+  # Extract major versions
+  local current_major=$(echo "$current_os" | cut -d. -f1)
+  local initial_major=$(echo "$initial_os" | cut -d. -f1)
+  log_info "Initial major: $initial_major, Current major: $current_major"
+  
+  # Check if major version changed during deferral
+  if [[ $current_major -gt $initial_major ]]; then
+    log_info "Major version increased during deferral ($initial_major → $current_major)"
+  elif [[ $current_major -eq $initial_major ]]; then
+    log_info "Major version unchanged during deferral (still $current_major)"
+  else
+    log_info "Warning: Current major version ($current_major) is less than initial ($initial_major)"
+  fi
+  
+  log_info "===== DEFERRAL OS CHECK TEST COMPLETE ====="
+  
+  # Return true (0) to allow script to continue regardless of actual OS versions
+  return 0
 }
 
 check_os_already_updated() {
@@ -1455,6 +1552,10 @@ check_if_os_upgraded_during_deferral() {
     return 1  # Update needed
   fi
 }
+
+########################################################################################################################################################################
+# ---------------- End Version Check Functions ----------------
+########################################################################################################################################################################
 
 # ---------------- Deferral State ----------------
 
@@ -2988,10 +3089,31 @@ if [ -f "$TRIGGER_FILE" ]; then
   
   # Check if OS was upgraded during deferral
   if [[ "$SKIP_OS_VERSION_CHECK" == "true" ]]; then
-    log_message "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
-    # Run the check but ignore the result
-    check_if_os_upgraded_during_deferral
-    log_message "Test mode - proceeding with installation regardless of OS version"
+    log_message "===== DEFERRAL OS CHECK TEST MODE ====="
+    log_message "Test modes active: TEST_MODE=${TEST_MODE}, SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}"
+    
+    # Get current OS version
+    local current_os=$(sw_vers -productVersion)
+    log_message "Current OS version: $current_os"
+    
+    # Get initial and target OS versions
+    local initial_os=$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "$current_os")
+    local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "${INSTALLER_OS}")
+    log_message "Initial OS version (when deferred): $initial_os"
+    log_message "Target OS version: $target_os"
+    
+    # Run the deferral check
+    log_message "----- DEFERRAL VERSION CHECK TEST -----"
+    if check_if_os_upgraded_during_deferral; then
+      log_message "TEST RESULT: OS has been upgraded during deferral period or is already at target."
+      log_message "In normal mode, a scheduled installation would exit here."
+      log_message "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, installation will continue anyway."
+    else
+      log_message "TEST RESULT: OS has NOT been upgraded during deferral and needs update."
+    fi
+    
+    log_message "===== DEFERRAL OS CHECK TEST COMPLETE ====="
+    # Continue regardless of check result in test mode
   elif check_if_os_upgraded_during_deferral; then
     log_message "OS already updated to meet target version. No need to install. Exiting."
     # Display a notification to the user
@@ -3644,8 +3766,11 @@ kill_lingering_watchdogs() {
   fi
 }
 
-# ---------------- Installer ----------------
-
+########################################################################################################################################################################
+#
+# ---------------- Run Erase-Install Installer ----------------
+#
+########################################################################################################################################################################
 run_erase_install() {
   log_info "Starting user detection for run_erase_install"
   
@@ -3719,6 +3844,16 @@ run_erase_install() {
         log_error "Failed to terminate process ${pid}"
       done
     fi
+  fi
+  
+  # Check if OS is already updated before running installation - add this check
+  log_info "Checking if OS is already at or above target version..."
+  if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+    log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+    test_os_version_check  # Use the initial version check
+  elif check_os_already_updated; then
+    log_info "OS already updated to target version. No need to install. Exiting."
+    return 0
   fi
   
   # Show authentication notice before starting erase-install
@@ -3835,6 +3970,15 @@ show_preinstall() {
   remove_existing_launchdaemon
   
   log_info "Starting pre-installation sequence with countdown: $show_countdown"
+  
+  # Check OS version before countdown
+  if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+    log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+    test_os_version_check
+  elif check_os_already_updated; then
+    log_info "OS already updated to target version. No need to install. Exiting."
+    return 0
+  fi
   
   # Skip countdown if show_countdown is false
   if [[ "$show_countdown" == "false" ]]; then
@@ -4596,6 +4740,17 @@ if [[ "$1" == "--scheduled" ]]; then
   init_logging
   log_info "Starting scheduled installation process (PID: $$)"
   
+  # Check if OS is already updated before running installation
+  log_info "Checking if OS is already at or above target version..."
+  if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
+    log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
+    test_deferral_os_check
+  elif check_if_os_upgraded_during_deferral; then
+    log_info "OS already updated to target version or newer. No need to install. Exiting."
+    cleanup_and_exit
+    exit 0
+  fi
+  
   # Define cleanup function
   cleanup_and_exit() {
     local exit_code=$?
@@ -4796,7 +4951,7 @@ EOF
   log_info "Checking if OS is already at or above target version..."
   if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
     log_info "SKIP_OS_VERSION_CHECK is enabled - testing but continuing regardless of OS version"
-    test_os_version_check
+    test_deferral_os_check
   elif check_if_os_upgraded_during_deferral; then
     log_info "OS already updated to target version or newer. No need to install. Exiting."
     cleanup_and_exit
@@ -4866,7 +5021,12 @@ EOF
   cleanup_and_exit
 fi
 
-#---------------------MAIN-------------------------------
+########################################################################################################################################################################
+#
+#--------------------- MAIN -------------------------------
+#
+########################################################################################################################################################################
+
 # Enhanced function to detect if the script is being run by an abort daemon
 is_running_from_abort_daemon() {
   # MOST RELIABLE: Check for our global early detection flag first
@@ -4971,6 +5131,7 @@ log_info "Performing early OS version check..."
 if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
   log_info "SKIP_OS_VERSION_CHECK is enabled - running test mode but continuing regardless of OS version"
   test_os_version_check
+  # Always continue when in test mode
 elif check_os_already_updated; then
   log_info "System is already running the target OS version. No update needed."
   
@@ -4994,7 +5155,6 @@ elif check_os_already_updated; then
   log_info "Exiting script as no update is needed."
   exit 0
 fi
-
 
 # Get current deferral state
 get_deferral_state

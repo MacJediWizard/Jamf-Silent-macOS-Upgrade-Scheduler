@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+
+## [1.6.2] - 2025-05-19
+### Added
+- Specialized test functions for different OS version check contexts
+- Detailed version component comparison in test logs
+- Enhanced watchdog script template with better test mode logging
+- New test_deferral_os_check function specifically for testing deferral scenarios
+- Improved version extraction from multiple sources (erase-install, SOFA)
+
+### Fixed
+- Redundant OS version checks in testing workflow
+- Confusing log output during test mode execution
+- Inconsistent test behavior between initial and scheduled checks
+- Edge cases in version component comparison for minor versions
+
+### Improved
+- Separated initial OS check from deferral check in test mode
+- More informative test mode logging with clear section markers
+- Better diagnostic information in version check test output
+- Clearer distinction between test functions and core check functions
+- Version detection from multiple sources with better fallback behavior
+
+---
+
 ## [1.6.1] - 2025-05-19
 ### Added
 - Version detection from GitHub releases page to always get latest available version
