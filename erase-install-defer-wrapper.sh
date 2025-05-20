@@ -31,6 +31,13 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# Changes in 1.6.3:
+#         - Improved reliability of LaunchDaemon creation and loading
+#         - Added script validation for watchdog and abort daemons
+#         - Enhanced parameter verification to ensure critical settings are maintained
+#         - Fixed local variable issues in watchdog cleanup process
+#         - Improved abort functionality to match defer reliability
+#         - Added better daemon verification for both scheduled and abort modes
 # v1.6.2 - Enhanced OS version check testing
 #         - Added specialized test functions for different OS version check contexts
 #         - Separated initial OS check from deferral check in test mode
@@ -116,7 +123,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.6.1"              # Current version of this script
+SCRIPT_VERSION="1.6.3"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -1223,8 +1230,8 @@ get_available_macos_version() {
   local tmp_file=$(mktemp)
   
   # Run erase-install with list-only flag
-  log_info "Running erase-install in list-only mode..." >&2
-  "${SCRIPT_PATH}" --list-only > "$tmp_file" 2>&1
+  log_info "Running erase-install in list mode..." >&2
+  "${SCRIPT_PATH}" --list > "$tmp_file" 2>&1
   
   # Look for the table header line
   local table_start=$(grep -n "│ IDENTIFIER │" "$tmp_file" | cut -d':' -f1)
@@ -1556,14 +1563,21 @@ check_if_os_upgraded_during_deferral() {
 ########################################################################################################################################################################
 # ---------------- End Version Check Functions ----------------
 ########################################################################################################################################################################
-
+########################################################################################################################################################################
+#
 # ---------------- Deferral State ----------------
-
+#
+########################################################################################################################################################################
 init_plist() {
+  # Ensure the directory exists
+  mkdir -p "$(dirname "${PLIST}")" 2>/dev/null
+  
   if [[ ! -f "${PLIST}" ]]; then
+    log_info "Creating new preferences file at ${PLIST}"
     defaults write "${PLIST}" scriptVersion -string "${SCRIPT_VERSION}"
     defaults write "${PLIST}" deferCount -int 0
     defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+    defaults write "${PLIST}" abortCount -int 0
     
     # Add initial OS version and target version info
     local current_os=$(sw_vers -productVersion)
@@ -1582,6 +1596,7 @@ init_plist() {
       defaults write "${PLIST}" scriptVersion -string "${SCRIPT_VERSION}"
       defaults write "${PLIST}" deferCount -int 0
       defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+      defaults write "${PLIST}" abortCount -int 0
       
       # Reset OS version info
       local current_os=$(sw_vers -productVersion)
@@ -1592,14 +1607,42 @@ init_plist() {
       available_version=$(get_available_macos_version)
       defaults write "${PLIST}" targetOSVersion -string "${available_version}"
       
-      log_info "Updated initial OS: $current_os and target OS: $available_version"
+      log_info "Updated initial OS: $current_os and target OS: $available_version for deferrals"
+    else
+      log_info "Using existing deferral data (script version unchanged: ${ver})"
+      # Log current deferral state for debugging
+      local current_defer_count
+      current_defer_count=$(defaults read "${PLIST}" deferCount 2>/dev/null || echo "0")
+      local first_date
+      first_date=$(defaults read "${PLIST}" firstPromptDate 2>/dev/null || echo "0")
+      log_info "Current deferral state: count=${current_defer_count}, first prompt=$(date -r ${first_date} '+%Y-%m-%d %H:%M:%S')"
     fi
   fi
   
-  defaults read "${PLIST}" deferCount &>/dev/null || defaults write "${PLIST}" deferCount -int 0
-  defaults read "${PLIST}" firstPromptDate &>/dev/null || defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
-  defaults read "${PLIST}" initialOSVersion &>/dev/null || defaults write "${PLIST}" initialOSVersion -string "$(sw_vers -productVersion)"
-  defaults read "${PLIST}" abortCount &>/dev/null || defaults write "${PLIST}" abortCount -int 0
+  # Ensure deferCount exists and is a valid integer
+  if ! defaults read "${PLIST}" deferCount &>/dev/null; then
+    log_info "deferCount missing or invalid - resetting to 0"
+    defaults write "${PLIST}" deferCount -int 0
+  fi
+  
+  # Ensure firstPromptDate exists
+  if ! defaults read "${PLIST}" firstPromptDate &>/dev/null; then
+    log_info "firstPromptDate missing - setting to now"
+    defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+  fi
+  
+  # Ensure initialOSVersion exists
+  if ! defaults read "${PLIST}" initialOSVersion &>/dev/null; then
+    local current_os=$(sw_vers -productVersion)
+    log_info "initialOSVersion missing - setting to current: ${current_os}"
+    defaults write "${PLIST}" initialOSVersion -string "${current_os}"
+  fi
+  
+  # Ensure abortCount exists
+  if ! defaults read "${PLIST}" abortCount &>/dev/null; then
+    log_info "abortCount missing - setting to 0"
+    defaults write "${PLIST}" abortCount -int 0
+  fi
   
   # Make sure we have target version
   if ! defaults read "${PLIST}" targetOSVersion &>/dev/null; then
@@ -1608,6 +1651,15 @@ init_plist() {
     available_version=$(get_available_macos_version)
     defaults write "${PLIST}" targetOSVersion -string "${available_version}"
     log_info "Added missing target OS version: $available_version"
+  fi
+  
+  # Verify the deferCount was properly read
+  local verify_count
+  verify_count=$(defaults read "${PLIST}" deferCount 2>/dev/null || echo "ERROR")
+  if [[ "$verify_count" == "ERROR" ]]; then
+    log_error "Failed to read deferCount after initialization - check permissions on ${PLIST}"
+    defaults write "${PLIST}" deferCount -int 0
+    log_info "Forcibly reset deferCount to 0"
   fi
 }
 
@@ -1620,19 +1672,49 @@ reset_deferrals() {
 }
 
 get_deferral_state() {
+  log_info "Checking deferral state..."
+  
+  # Read values with error handling
   deferCount=$(defaults read "${PLIST}" deferCount 2>/dev/null || echo 0)
+  if [[ -z "$deferCount" || "$deferCount" == "" ]]; then
+    log_warn "Invalid deferCount read from plist, using 0 as fallback"
+    deferCount=0
+    # Try to fix the plist
+    defaults write "${PLIST}" deferCount -int 0
+  fi
+  
   firstDate=$(defaults read "${PLIST}" firstPromptDate 2>/dev/null || echo 0)
+  if [[ -z "$firstDate" || "$firstDate" == "" ]]; then
+    log_warn "Invalid firstPromptDate read from plist, using current time as fallback"
+    firstDate=$(date -u +%s)
+    # Try to fix the plist
+    defaults write "${PLIST}" firstPromptDate -string "${firstDate}"
+  fi
+  
   local now; now=$(date -u +%s)
   local elapsed=$((now - firstDate))
-  log_debug "deferCount=${deferCount}, elapsed=${elapsed}s, MAX_DEFERS=${MAX_DEFERS}"
+  
+  log_info "Current deferral state: count=${deferCount}/${MAX_DEFERS}, elapsed=${elapsed}s/${FORCE_TIMEOUT_SECONDS}s"
+  
+  # Calculate elapsed hours for display - use integer division to avoid floating point errors
+  local elapsed_hours=$((elapsed / 3600))
+  local timeout_hours=$((FORCE_TIMEOUT_SECONDS / 3600))
+  
   DEFERRAL_EXCEEDED=false
-  if (( deferCount >= MAX_DEFERS )) || (( elapsed >= FORCE_TIMEOUT_SECONDS )); then
+  if (( deferCount >= MAX_DEFERS )); then
     DEFERRAL_EXCEEDED=true
-    log_info "Deferral limit exceeded: count=${deferCount}/${MAX_DEFERS}, elapsed=${elapsed}s/${FORCE_TIMEOUT_SECONDS}s"
+    log_info "Deferral limit exceeded: count=${deferCount}/${MAX_DEFERS} - maximum deferrals reached"
+  elif (( elapsed >= FORCE_TIMEOUT_SECONDS )); then
+    DEFERRAL_EXCEEDED=true
+    log_info "Deferral time limit exceeded: elapsed=${elapsed}s/${FORCE_TIMEOUT_SECONDS}s (${elapsed_hours}/${timeout_hours} hours)"
   else
-    log_debug "Deferral limit not exceeded: count=${deferCount}/${MAX_DEFERS}, elapsed=${elapsed}s/${FORCE_TIMEOUT_SECONDS}s"
+    log_info "Deferral limit not exceeded: ${deferCount}/${MAX_DEFERS} deferrals used, ${elapsed_hours}/${timeout_hours} hours elapsed"
   fi
 }
+
+########################################################################################################################################################################
+# ---------------- End Deferral State ----------------
+########################################################################################################################################################################
 
 # ---------------- LaunchDaemon ----------------
 
@@ -1642,7 +1724,6 @@ remove_existing_launchdaemon() {
   local found_count=0
   local removed_count=0
   local is_scheduled=false
-  local preserve_parent_daemon=""
   local preserve_abort_daemon=false
   
   # Parse the arguments
@@ -1650,30 +1731,37 @@ remove_existing_launchdaemon() {
     case "$arg" in
       --preserve-scheduled)
         is_scheduled=true
-        ;;
-      --preserve-parent=*)
-        preserve_parent_daemon="${arg#*=}"
-        log_info "Will preserve parent daemon: $preserve_parent_daemon during cleanup"
-        ;;
+      ;;
       --preserve-abort-daemon)
         preserve_abort_daemon=true
-        log_info "Will preserve all abort daemons during cleanup"
-        ;;
+      ;;
     esac
   done
+  
+  # Check if we have an active relaunch daemon to preserve
+  local active_relaunch_daemon=$(defaults read "${PLIST}" activeRelaunchDaemon 2>/dev/null || echo "")
+  if [[ -n "$active_relaunch_daemon" ]]; then
+    log_info "Found active relaunch daemon in plist: $active_relaunch_daemon"
+  fi
   
   # First forcefully remove lingering entries from launchctl
   for label in $(launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
     if [ -n "$label" ]; then
-      # Skip if this is our parent daemon that we want to preserve
-      if [[ -n "$preserve_parent_daemon" && "$label" == "$preserve_parent_daemon" ]]; then
-        log_info "Skipping removal of parent daemon: $label"
+      # Skip if this is our active relaunch daemon
+      if [[ -n "$active_relaunch_daemon" && "$label" == "$active_relaunch_daemon" ]]; then
+        log_info "Preserving active relaunch daemon: $label"
         continue
       fi
       
-      # Skip if this is an abort daemon and we're preserving abort daemons
-      if [[ "$preserve_abort_daemon" == "true" && "$label" == *".abort."* ]]; then
-        log_info "Skipping removal of abort daemon: $label"
+      # Skip scheduled daemons if we're preserving them
+      if [[ "${is_scheduled}" == "true" ]] && sudo launchctl list "${label}" 2>/dev/null | grep -q -- "--scheduled"; then
+        log_info "Preserving scheduled daemon: ${label}"
+        continue
+      fi
+      
+      # Skip abort daemons if we're preserving them
+      if [[ "$preserve_abort_daemon" == "true" && "${label}" == *".abort."* ]]; then
+        log_info "Preserving abort daemon: ${label}"
         continue
       fi
       
@@ -1690,8 +1778,14 @@ remove_existing_launchdaemon() {
     if [ -n "$user_id" ]; then
       for label in $(launchctl asuser "$user_id" launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
         if [ -n "$label" ]; then
+          # Skip if this relates to our active relaunch daemon
+          if [[ -n "$active_relaunch_daemon" && "$label" == *"$active_relaunch_daemon"* ]]; then
+            log_info "Preserving user-level agent related to active relaunch daemon: $label"
+            continue
+          fi
+          
           log_info "Force removing lingering agent for user $user: $label"
-          launchctl asuser "$user_id" launchctl remove "$label" 2>/dev/null || log_warn "Failed to remove: $label"
+          launchctl asuser "$user_id" sudo -u "$user" launchctl remove "$label" 2>/dev/null || log_warn "Failed to remove: $label"
           # Try another method
           launchctl asuser "$user_id" sudo -u "$user" launchctl unload "/Users/$user/Library/LaunchAgents/$label.plist" 2>/dev/null
           # Also try bootout for agents
@@ -1716,8 +1810,14 @@ remove_existing_launchdaemon() {
   
   if [ -n "${loaded_daemons}" ]; then
     log_debug "Found loaded daemons: ${loaded_daemons}"
-    echo "${loaded_daemons}" | while IFS= read -r label; do
+    while IFS= read -r label; do
       [ -z "${label}" ] && continue
+      
+      # Skip if this is our active relaunch daemon
+      if [[ -n "$active_relaunch_daemon" && "$label" == "$active_relaunch_daemon" ]]; then
+        log_info "Preserving active relaunch daemon: ${label}"
+        continue
+      fi
       
       # Skip scheduled daemons if we're preserving them
       if [[ "${is_scheduled}" == "true" ]] && sudo launchctl list "${label}" 2>/dev/null | grep -q -- "--scheduled"; then
@@ -1762,7 +1862,7 @@ remove_existing_launchdaemon() {
           log_info "Successfully removed daemon: ${label}"
         fi
       fi
-    done
+    done <<< "${loaded_daemons}"
   else
     log_debug "No loaded daemons found"
   fi
@@ -1770,6 +1870,15 @@ remove_existing_launchdaemon() {
   # Find and remove ALL matching plist files, even if not loaded
   while IFS= read -r file; do
     [ -z "${file}" ] && continue
+    
+    # Get the file label (filename without path or extension)
+    local file_label=$(basename "$file" .plist)
+    
+    # Skip if this is our active relaunch daemon
+    if [[ -n "$active_relaunch_daemon" && "$file_label" == "$active_relaunch_daemon" ]]; then
+      log_info "Preserving active relaunch daemon file: ${file}"
+      continue
+    fi
     
     # Skip scheduled daemons if we're preserving them
     if [[ "${is_scheduled}" == "true" ]] && grep -q -- "--scheduled" "${file}" 2>/dev/null; then
@@ -1801,6 +1910,15 @@ remove_existing_launchdaemon() {
       while IFS= read -r file; do
         [ -z "${file}" ] && continue
         
+        # Get the file label
+        local file_label=$(basename "$file" .plist)
+        
+        # Skip if this relates to our active relaunch daemon
+        if [[ -n "$active_relaunch_daemon" && "$file_label" == *"$active_relaunch_daemon"* ]]; then
+          log_info "Preserving user agent file related to active relaunch daemon: ${file}"
+          continue
+        fi
+          
         # Skip scheduled agents if we're preserving them
         if [[ "${is_scheduled}" == "true" ]] && grep -q -- "--scheduled" "${file}" 2>/dev/null; then
           log_info "Preserving scheduled agent file: ${file}"
@@ -1823,80 +1941,161 @@ remove_existing_launchdaemon() {
           # Try with force
           sudo rm -f "${file}" 2>/dev/null && log_info "Force removed on second attempt: ${file}"
         fi
-      done < <(find "/Users/$user/Library/LaunchAgents" -type f -name "*.plist" | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" 2>/dev/null)
-    fi
-  done
-  
-  # Final explicit check and removal of known paths
-  for file in "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak" "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"; do
-    if [ -f "${file}" ]; then
-      log_warn "Found remaining LaunchDaemon file: ${file}"
-      if sudo rm -f "${file}"; then
-        log_info "Forcefully removed file: ${file}"
-        ((removed_count++))
+        done < <(find "/Users/$user/Library/LaunchAgents" -type f -name "*.plist" | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" 2>/dev/null)
+      fi
+    done
+    
+    # Final explicit check and removal of known paths
+    for file in "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak" "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"; do
+      if [ -f "${file}" ]; then
+        # Skip if this is related to our active relaunch daemon
+        local this_label=$(basename "$file" .plist)
+        if [[ -n "$active_relaunch_daemon" && "$this_label" == "$active_relaunch_daemon" ]]; then
+          log_info "Preserving active relaunch daemon file: ${file}"
+          continue
+        fi
+        
+        log_warn "Found remaining LaunchDaemon file: ${file}"
+        if sudo rm -f "${file}"; then
+          log_info "Forcefully removed file: ${file}"
+          ((removed_count++))
+        else
+          log_error "Failed to forcefully remove: ${file}"
+        fi
+      fi
+    done
+    
+    # Also cleanup helper scripts and watchdog scripts
+    # Preserve any related to our active relaunch daemon
+    if [[ -n "$active_relaunch_daemon" ]]; then
+      # Extract ID from the relaunch daemon label
+      local active_id=$(echo "$active_relaunch_daemon" | grep -o '[0-9]\{14\}' || echo "")
+      
+      if [[ -n "$active_id" ]]; then
+        log_info "Preserving watchdog scripts for active ID: $active_id"
+        # Remove other watchdog scripts
+        sudo find "/Library/Management/erase-install" -name "erase-install-watchdog-*.sh" -not -name "*${active_id}*" -delete 2>/dev/null
       else
-        log_error "Failed to forcefully remove: ${file}"
+        sudo rm -f "/Library/Management/erase-install/erase-install-watchdog-*.sh" 2>/dev/null
       fi
+    else
+      sudo rm -f "/Library/Management/erase-install/erase-install-watchdog-*.sh" 2>/dev/null
     fi
-  done
-  
-  # Also cleanup helper scripts and watchdog scripts
-  sudo rm -f "/Library/Management/erase-install/erase-install-watchdog*.sh" 2>/dev/null
-  for user in $(ls /Users); do
-    sudo -u "$user" rm -f "/Users/$user/Library/Application Support/erase-install-helper*.sh" 2>/dev/null
-  done
-  
-  # Clean up trigger files
-  sudo rm -f /var/tmp/erase-install-trigger* 2>/dev/null
-  
-  # Clean up any control files left by erase-install
-  sudo rm -f /var/tmp/dialog.* 2>/dev/null
-  
-  # Final explicit check for any remaining files - use find directly
-  log_info "Performing final deep cleanup check for any remaining files"
-  for plist in $(sudo find /Library/LaunchDaemons -name "*eraseinstall*.plist" -o -name "*erase-install*.plist" 2>/dev/null); do
-    log_info "Found remaining daemon file: $plist"
-    sudo rm -f "$plist" && log_info "Removed: $plist" || log_error "Failed to remove: $plist"
-  done
-  
-  # Report results
-  if [ ${found_count} -gt 0 ]; then
-    log_info "LaunchDaemon cleanup complete. Removed: ${removed_count}, Failed: $((found_count - removed_count))"
-  else
-    log_debug "No LaunchDaemons found to remove"
-  fi
-  
-  # Final verification - check if any lingering daemons remain
-  if launchctl list 2>/dev/null | grep -q -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install"; then
-    log_warn "Some launch items may still be registered despite cleanup"
-    # Force unload all remaining items
-    for label in $(launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
-      log_info "Final attempt to remove daemon: $label"
-      sudo launchctl remove "$label" 2>/dev/null
-    done
-  fi
-  
-  # One final check for the problematic daemons using wildcard patterns
-  for problematic_pattern in "/Library/LaunchDaemons/com.github.grahampugh.erase-install.*.plist" "/Library/LaunchDaemons/com.macjediwizard.eraseinstall.*.plist"; do
-    for daemon in $(ls $problematic_pattern 2>/dev/null); do
-      if [ -f "$daemon" ]; then
-        log_warn "Critical: Found problematic daemon after cleanup: $daemon"
-        # Get the label from the filename
-        local daemon_label=$(basename "$daemon" .plist)
-        # Try to unload it
-        sudo launchctl remove "$daemon_label" 2>/dev/null
-        # Then remove the file
-        sudo rm -f "$daemon" && log_info "Forcefully removed: $daemon" || log_error "FAILED to forcefully remove: $daemon"
+    
+    # For helper scripts in user directories, preserve active ones
+    for user in $(ls /Users); do
+      if [[ -n "$active_relaunch_daemon" ]]; then
+        # Extract ID from the relaunch daemon label
+        local active_id=$(echo "$active_relaunch_daemon" | grep -o '[0-9]\{14\}' || echo "")
+        
+        if [[ -n "$active_id" ]]; then
+          # Remove other helper scripts
+          sudo -u "$user" find "/Users/$user/Library/Application Support" -name "erase-install-helper-*.sh" -not -name "*${active_id}*" -delete 2>/dev/null
+        else
+          sudo -u "$user" rm -f "/Users/$user/Library/Application Support/erase-install-helper-*.sh" 2>/dev/null
+        fi
+      else
+        sudo -u "$user" rm -f "/Users/$user/Library/Application Support/erase-install-helper-*.sh" 2>/dev/null
       fi
     done
-  done
-  
-  # Verify cleanup
-  if [ -f "${LAUNCHDAEMON_PATH}" ] || [ -f "${LAUNCHDAEMON_PATH}.bak" ] || [ -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist" ]; then
-    log_error "LaunchDaemon cleanup incomplete - files still exist"
-    return 1
-  fi
-  
+    
+    # Clean up trigger files
+    if [[ -n "$active_relaunch_daemon" ]]; then
+      # Extract ID from the relaunch daemon label
+      local active_id=$(echo "$active_relaunch_daemon" | grep -o '[0-9]\{14\}' || echo "")
+      
+      if [[ -n "$active_id" ]]; then
+        # Remove other trigger files
+        sudo find "/var/tmp" -name "erase-install-trigger-*" -not -name "*${active_id}*" -delete 2>/dev/null
+      else
+        sudo rm -f /var/tmp/erase-install-trigger* 2>/dev/null
+      fi
+    else
+      sudo rm -f /var/tmp/erase-install-trigger* 2>/dev/null
+    fi
+    
+    # Clean up any control files left by erase-install
+    sudo rm -f /var/tmp/dialog.* 2>/dev/null
+    
+    # Final explicit check for any remaining files - use find directly
+    log_info "Performing final deep cleanup check for any remaining files"
+    for plist in $(sudo find /Library/LaunchDaemons -name "*eraseinstall*.plist" -o -name "*erase-install*.plist" 2>/dev/null); do
+      # Skip if this is our active relaunch daemon
+      local this_label=$(basename "$plist" .plist)
+      if [[ -n "$active_relaunch_daemon" && "$this_label" == "$active_relaunch_daemon" ]]; then
+        log_info "Preserving active relaunch daemon file in final cleanup: ${plist}"
+        continue
+      fi
+      
+      log_info "Found remaining daemon file: $plist"
+      sudo rm -f "$plist" && log_info "Removed: $plist" || log_error "Failed to remove: $plist"
+    done
+    
+    # Report results
+    if [ ${found_count} -gt 0 ]; then
+      log_info "LaunchDaemon cleanup complete. Removed: ${removed_count}, Failed: $((found_count - removed_count))"
+    else
+      log_debug "No LaunchDaemons found to remove"
+    fi
+    
+    # Final verification - check if any lingering daemons remain
+    if launchctl list 2>/dev/null | grep -q -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install"; then
+      log_warn "Some launch items may still be registered despite cleanup"
+      # Force unload all remaining items except our active relaunch daemon
+      for label in $(launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
+        # Skip if this is our active relaunch daemon
+        if [[ -n "$active_relaunch_daemon" && "$label" == "$active_relaunch_daemon" ]]; then
+          log_info "Preserving active relaunch daemon in final verification: ${label}"
+          continue
+        fi
+        
+        log_info "Final attempt to remove daemon: $label"
+        sudo launchctl remove "$label" 2>/dev/null
+      done
+    fi
+    
+    # One final check for the problematic daemons using wildcard patterns
+    for problematic_pattern in "/Library/LaunchDaemons/com.github.grahampugh.erase-install.*.plist" "/Library/LaunchDaemons/com.macjediwizard.eraseinstall.*.plist"; do
+      for daemon in $(ls $problematic_pattern 2>/dev/null); do
+        if [ -f "$daemon" ]; then
+          # Get the daemon label (filename without path or extension)
+          local daemon_label=$(basename "$daemon" .plist)
+          
+          # Skip if this is our active relaunch daemon
+          if [[ -n "$active_relaunch_daemon" && "$daemon_label" == "$active_relaunch_daemon" ]]; then
+            log_info "Preserving active relaunch daemon in problematic check: ${daemon}"
+            continue
+          fi
+          
+          log_warn "Critical: Found problematic daemon after cleanup: $daemon"
+          # Try to unload it
+          sudo launchctl remove "$daemon_label" 2>/dev/null
+          # Then remove the file
+          sudo rm -f "$daemon" && log_info "Forcefully removed: $daemon" || log_error "FAILED to forcefully remove: $daemon"
+        fi
+      done
+    done
+    
+    # Verify cleanup
+    local verify_failed=false
+    for file in "${LAUNCHDAEMON_PATH}" "${LAUNCHDAEMON_PATH}.bak" "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"; do
+      if [ -f "${file}" ]; then
+        # Skip verification for active relaunch daemon
+        local this_label=$(basename "$file" .plist)
+        if [[ -n "$active_relaunch_daemon" && "$this_label" == "$active_relaunch_daemon" ]]; then
+          log_info "Active relaunch daemon still present as expected: ${file}"
+          continue
+        fi
+          
+        log_error "LaunchDaemon cleanup incomplete - files still exist: ${file}"
+        verify_failed=true
+      fi
+    done
+    
+    if [[ "$verify_failed" == "true" ]]; then
+      return 1
+    fi
+    
   return 0
 }
 
@@ -1955,6 +2154,27 @@ create_scheduled_launchdaemon() {
   # Add debug logging for input parameters
   log_debug "create_scheduled_launchdaemon called with: hour=$hour, minute=$minute, day=$day, month=$month, mode=$mode"
   
+  # Detect our parent relaunch daemon, if any
+  if [ -n "$PPID" ]; then
+    local parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || echo "")
+    local parent_args=$(ps -o args= -p "$PPID" 2>/dev/null || echo "")
+    
+    if [[ "$parent_cmd" == *"com.macjediwizard.eraseinstall.relaunch."* ]]; then
+      # We're running under a relaunch daemon
+      if [[ "$parent_cmd" =~ com\.macjediwizard\.eraseinstall\.relaunch\.([0-9]+) ]]; then
+        log_info "Running under relaunch daemon for defer sequence - preserving parent: $parent_cmd"
+        PARENT_RELAUNCH_DAEMON="${BASH_REMATCH[0]}"
+        PARENT_RELAUNCH_ID="${BASH_REMATCH[1]}"
+        log_info "Parent relaunch daemon: $PARENT_RELAUNCH_DAEMON (ID: $PARENT_RELAUNCH_ID)"
+        
+        # Export variables to make them available to child processes
+        export PARENT_RELAUNCH_DAEMON PARENT_RELAUNCH_ID
+        # Also set a global variable to indicate we're running from a relaunch daemon
+        export RUNNING_FROM_RELAUNCH_DAEMON=true
+      fi
+    fi
+  fi
+  
   # Convert all values to base-10 integers
   local hour_num=$((10#${hour}))
   local minute_num=$((10#${minute}))
@@ -1971,13 +2191,25 @@ create_scheduled_launchdaemon() {
   local run_id="$(date +%Y%m%d%H%M%S)"
   log_debug "Generated run_id: $run_id"
   
-  # Check if this is a silent deferral (should not show UI)
-  local show_ui=true
+  # Store this run_id as the active relaunch daemon if this is a defer operation
   if [[ "$mode" == "defer" ]]; then
-    show_ui=false
-    log_info "Creating defer-type silent schedule for $(printf '%02d:%02d' ${hour_num} ${minute_num}) (no UI will be shown)"
-  else
-    log_info "Creating ${mode}-type schedule with UI for $(printf '%02d:%02d' ${hour_num} ${minute_num})"
+    # Define the relaunch daemon label using the current run_id
+    local relaunch_daemon_label="com.macjediwizard.eraseinstall.relaunch.${run_id}"
+    log_info "Setting active relaunch daemon: $relaunch_daemon_label"
+    
+    # Store in the plist for persistence
+    defaults write "${PLIST}" activeRelaunchDaemon -string "${relaunch_daemon_label}"
+    
+    # Before creating a new relaunch daemon, check if there's an existing one
+    # that's different from the one we're about to create
+    local previous_relaunch=$(defaults read "${PLIST}" activeRelaunchDaemon 2>/dev/null || echo "")
+    if [[ -n "$previous_relaunch" && "$previous_relaunch" != "$relaunch_daemon_label" ]]; then
+      log_info "Found previous relaunch daemon: $previous_relaunch"
+      log_info "New relaunch daemon will be: $relaunch_daemon_label"
+      
+      # We don't need to do anything here as the remove_existing_launchdaemon function
+      # will preserve the current active relaunch daemon and clean up any old ones
+    fi
   fi
   
   # Set the global variable for other functions to access
@@ -2015,16 +2247,16 @@ create_scheduled_launchdaemon() {
   
   # Determine if abort button should be shown
   local abort_button_code=""
+  local USE_ABORT_BUTTON=false
   if [[ "$mode" == "scheduled" && "${ENABLE_ABORT_BUTTON}" == "true" ]]; then
     # Check current abort count
     local abort_count=$(defaults read "${PLIST}" abortCount 2>/dev/null || echo 0)
     if [[ $abort_count -lt $MAX_ABORTS ]]; then
-      # Don't use a variable for this part - insert directly into the helper script below
+      # Enable abort button
       log_info "Adding abort button to dialog (abort count: ${abort_count}/${MAX_ABORTS})"
-      local USE_ABORT_BUTTON=true
+      USE_ABORT_BUTTON=true
     else
       log_info "Maximum aborts reached (${abort_count}/${MAX_ABORTS}) - not showing abort button"
-      local USE_ABORT_BUTTON=false
     fi
   fi
   
@@ -2057,59 +2289,59 @@ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created UI start signal file" >> "\$LOG_FI
 # Display dialog with countdown - enhanced for visibility
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting dialog with elevated priority" >> "\$LOG_FILE"
 "${DIALOG_BIN}" --title "${display_title}" \\
-  --message "${SCHEDULED_MESSAGE}" \\
-  --button1text "${SCHEDULED_CONTINUE_TEXT}" \\
-  $([[ "$USE_ABORT_BUTTON" == "true" ]] && echo "  --button2text '${ABORT_BUTTON_TEXT}' \\") \\
-  --icon "${DIALOG_ICON}" \\
-  --height ${SCHEDULED_CONTINUE_HEIGHT} \\
-  --width ${SCHEDULED_CONTINUE_WIDTH} \\
-  --moveable \\
-  --ontop \\
-  --position "${DIALOG_POSITION}" \\
-  --messagefont ${SCHEDULED_DIALOG_MESSAGEFONT} \\
-  --progress ${SCHEDULED_COUNTDOWN} \\
-  --progresstext "${SCHEDULED_PROGRESS_TEXT_MESSAGE}" \\
-  --timer ${SCHEDULED_COUNTDOWN} \\
-  --commandfile "/var/tmp/dialog-cmd-${run_id}"
+--message "${SCHEDULED_MESSAGE}" \\
+--button1text "${SCHEDULED_CONTINUE_TEXT}" \\
+$([[ "$USE_ABORT_BUTTON" == "true" ]] && echo "  --button2text '${ABORT_BUTTON_TEXT}' \\") \\
+--icon "${DIALOG_ICON}" \\
+--height ${SCHEDULED_CONTINUE_HEIGHT} \\
+--width ${SCHEDULED_CONTINUE_WIDTH} \\
+--moveable \\
+--ontop \\
+--position "${DIALOG_POSITION}" \\
+--messagefont ${SCHEDULED_DIALOG_MESSAGEFONT} \\
+--progress ${SCHEDULED_COUNTDOWN} \\
+--progresstext "${SCHEDULED_PROGRESS_TEXT_MESSAGE}" \\
+--timer ${SCHEDULED_COUNTDOWN} \\
+--commandfile "/var/tmp/dialog-cmd-${run_id}"
 
 DIALOG_RESULT=\$?
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog completed with status: \$DIALOG_RESULT" >> "\$LOG_FILE"
 
 # Check if abort was clicked (dialog result = 2)
 if [ \$DIALOG_RESULT -eq 2 ]; then
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Abort button was clicked" >> "\$LOG_FILE"
-  # Create abort file for watchdog to detect
-  touch "/var/tmp/erase-install-abort-${run_id}"
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created abort signal file at: /var/tmp/erase-install-abort-${run_id}" >> "\$LOG_FILE"
-  
-  # Verify the abort file was created
-  if [ -f "/var/tmp/erase-install-abort-${run_id}" ]; then
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Abort signal file verified" >> "\$LOG_FILE"
-  else
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Failed to create abort signal file" >> "\$LOG_FILE"
-    # Try again with sudo
-    sudo touch "/var/tmp/erase-install-abort-${run_id}" 2>/dev/null
-  fi
-  
-  # Show abort countdown dialog
-  "${DIALOG_BIN}" --title "Aborting Installation" \\
-    --message "Emergency abort activated. Installation will be postponed for ${ABORT_DEFER_MINUTES} minutes." \\
-    --icon ${ABORT_ICON} \\
-    --button1text "OK" \\
-    --timer ${ABORT_COUNTDOWN} \\
-    --progress ${ABORT_COUNTDOWN} \\
-    --progresstext "Aborting in \${ABORT_COUNTDOWN} seconds..." \\
-    --position "${DIALOG_POSITION}" \\
-    --moveable \\
-    --ontop \\
-    --height ${ABORT_HEIGHT} \\
-    --width ${ABORT_WIDTH} 
-    
-  # Signal success to the user
-  osascript -e "display notification \"Installation aborted and will be rescheduled\" with title \"macOS Upgrade\"" 2>/dev/null || true
-  
-  # Exit without creating trigger file
-  exit 0
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Abort button was clicked" >> "\$LOG_FILE"
+# Create abort file for watchdog to detect
+touch "/var/tmp/erase-install-abort-${run_id}"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created abort signal file at: /var/tmp/erase-install-abort-${run_id}" >> "\$LOG_FILE"
+
+# Verify the abort file was created
+if [ -f "/var/tmp/erase-install-abort-${run_id}" ]; then
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Abort signal file verified" >> "\$LOG_FILE"
+else
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Failed to create abort signal file" >> "\$LOG_FILE"
+# Try again with sudo
+sudo touch "/var/tmp/erase-install-abort-${run_id}" 2>/dev/null
+fi
+
+# Show abort countdown dialog
+"${DIALOG_BIN}" --title "Aborting Installation" \\
+--message "Emergency abort activated. Installation will be postponed for ${ABORT_DEFER_MINUTES} minutes." \\
+--icon ${ABORT_ICON} \\
+--button1text "OK" \\
+--timer ${ABORT_COUNTDOWN} \\
+--progress ${ABORT_COUNTDOWN} \\
+--progresstext "Aborting in \${ABORT_COUNTDOWN} seconds..." \\
+--position "${DIALOG_POSITION}" \\
+--moveable \\
+--ontop \\
+--height ${ABORT_HEIGHT} \\
+--width ${ABORT_WIDTH} 
+
+# Signal success to the user
+osascript -e "display notification \"Installation aborted and will be rescheduled\" with title \"macOS Upgrade\"" 2>/dev/null || true
+
+# Exit without creating trigger file
+exit 0
 fi
 
 # Wait for watchdog to be ready before creating trigger file
@@ -2120,38 +2352,38 @@ COUNTER=0
 # Wait for watchdog to be ready or timeout
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Waiting for watchdog to be ready..." >> "\$LOG_FILE"
 while [ ! -f "\$WATCHDOG_READY_FLAG" ] && [ \$COUNTER -lt \$TIMEOUT ]; do
-  sleep 1
-  COUNTER=\$((COUNTER + 1))
-  # Log progress every 10 seconds
-  if [ \$((COUNTER % 10)) -eq 0 ]; then
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Still waiting: \$COUNTER seconds elapsed" >> "\$LOG_FILE"
-  fi
+sleep 1
+COUNTER=\$((COUNTER + 1))
+# Log progress every 10 seconds
+if [ \$((COUNTER % 10)) -eq 0 ]; then
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Still waiting: \$COUNTER seconds elapsed" >> "\$LOG_FILE"
+fi
 done
 
 if [ -f "\$WATCHDOG_READY_FLAG" ]; then
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Watchdog is ready, creating trigger file" >> "\$LOG_FILE"
-  # Create trigger file to start installation
-  touch "$trigger_file"
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created trigger file: $trigger_file" >> "\$LOG_FILE"
-  # Wait to verify trigger file was created
-  sleep 1
-  if [ -f "$trigger_file" ]; then
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Trigger file verified" >> "\$LOG_FILE"
-  else
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Trigger file not found after creation" >> "\$LOG_FILE"
-  fi
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Watchdog is ready, creating trigger file" >> "\$LOG_FILE"
+# Create trigger file to start installation
+touch "$trigger_file"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created trigger file: $trigger_file" >> "\$LOG_FILE"
+# Wait to verify trigger file was created
+sleep 1
+if [ -f "$trigger_file" ]; then
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Trigger file verified" >> "\$LOG_FILE"
 else
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Watchdog not ready after \$TIMEOUT seconds" >> "\$LOG_FILE"
-  # Create trigger file anyway as last resort
-  touch "$trigger_file"
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created trigger file anyway: $trigger_file" >> "\$LOG_FILE"
-  # Wait to verify trigger file was created
-  sleep 1
-  if [ -f "$trigger_file" ]; then
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Trigger file verified" >> "\$LOG_FILE"
-  else
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Trigger file not found after creation" >> "\$LOG_FILE"
-  fi
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Trigger file not found after creation" >> "\$LOG_FILE"
+fi
+else
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Watchdog not ready after \$TIMEOUT seconds" >> "\$LOG_FILE"
+# Create trigger file anyway as last resort
+touch "$trigger_file"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created trigger file anyway: $trigger_file" >> "\$LOG_FILE"
+# Wait to verify trigger file was created
+sleep 1
+if [ -f "$trigger_file" ]; then
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Trigger file verified" >> "\$LOG_FILE"
+else
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Trigger file not found after creation" >> "\$LOG_FILE"
+fi
 fi
 
 # Self-cleanup - unload the agent and remove it
@@ -2184,49 +2416,49 @@ EOF
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
-  <key>Label</key>
-  <string>${agent_label}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>$helper_script</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>${hour_num}</integer>
-    <key>Minute</key>
-    <integer>${minute_num}</integer>
+<key>Label</key>
+<string>${agent_label}</string>
+<key>ProgramArguments</key>
+<array>
+<string>/bin/bash</string>
+<string>$helper_script</string>
+</array>
+<key>StartCalendarInterval</key>
+<dict>
+<key>Hour</key>
+<integer>${hour_num}</integer>
+<key>Minute</key>
+<integer>${minute_num}</integer>
 $([ -n "${day_num}" ] && printf "        <key>Day</key>\n        <integer>%d</integer>\n" "${day_num}")
 $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d</integer>\n" "${month_num}")
-  </dict>
-  <key>StandardOutPath</key>
-  <string>/Users/${console_user}/Library/Logs/erase-install-wrapper-ui.${run_id}.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/${console_user}/Library/Logs/erase-install-wrapper-ui.${run_id}.log</string>
-  <key>RunAtLoad</key>
-  <false/>
-  <key>LaunchOnlyOnce</key>
-  <true/>
-  <key>AbandonProcessGroup</key>
-  <true/>
-  <key>ProcessType</key>
-  <string>Interactive</string>
-  <key>SessionCreate</key>
-  <true/>
-  <key>LowPriorityIO</key>
-  <false/>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>LANG</key>
-    <string>en_US.UTF-8</string>
-    <key>DISPLAY</key>
-    <string>:0</string>
-    <key>DIALOG_CMD_FILE</key>
-    <string>/var/tmp/dialog-cmd-${run_id}</string>
-  </dict>
+</dict>
+<key>StandardOutPath</key>
+<string>/Users/${console_user}/Library/Logs/erase-install-wrapper-ui.${run_id}.log</string>
+<key>StandardErrorPath</key>
+<string>/Users/${console_user}/Library/Logs/erase-install-wrapper-ui.${run_id}.log</string>
+<key>RunAtLoad</key>
+<false/>
+<key>LaunchOnlyOnce</key>
+<true/>
+<key>AbandonProcessGroup</key>
+<true/>
+<key>ProcessType</key>
+<string>Interactive</string>
+<key>SessionCreate</key>
+<true/>
+<key>LowPriorityIO</key>
+<false/>
+<key>EnvironmentVariables</key>
+<dict>
+<key>PATH</key>
+<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+<key>LANG</key>
+<string>en_US.UTF-8</string>
+<key>DISPLAY</key>
+<string>:0</string>
+<key>DIALOG_CMD_FILE</key>
+<string>/var/tmp/dialog-cmd-${run_id}</string>
+</dict>
 </dict>
 </plist>"
   
@@ -2247,6 +2479,92 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
     fi
   fi
   log_info "Using main script path: ${WRAPPER_PATH} for deferred execution"
+  
+  # Helper function to verify script substitutions (to be used only in debug mode)
+  verify_script_substitutions() {
+    local script_path="$1"
+    log_info "Verifying critical parameter substitutions in watchdog script..."
+    
+    for param in "PREVENT_ALL_REBOOTS" "TEST_MODE" "REINSTALL"; do
+      if grep -q "${param}=\"true\"" "$script_path"; then
+        log_info "SCRIPT DEBUG: ✅ ${param} successfully set to 'true' in watchdog script"
+      elif grep -q "${param}=\"false\"" "$script_path"; then
+        log_info "SCRIPT DEBUG: ✅ ${param} successfully set to 'false' in watchdog script"
+      else
+        log_error "SCRIPT DEBUG: ❌ Failed to properly substitute ${param} in watchdog script"
+        grep "${param}" "$script_path" | head -1 | log_debug
+      fi
+    done
+  }
+  
+  # Function to validate the watchdog script for syntax errors
+  validate_watchdog_script() {
+    local script_path="$1"
+    log_info "Validating watchdog script integrity..."
+    
+    local validation_output=$(bash -n "$script_path" 2>&1)
+    if [ $? -ne 0 ]; then
+      log_error "CRITICAL: Generated watchdog script contains syntax errors:"
+      log_error "$validation_output"
+      
+      # Create a backup for troubleshooting
+      local watchdog_backup="${script_path}.broken-$(date +%s)"
+      cp "$script_path" "$watchdog_backup"
+      log_error "Created backup at ${watchdog_backup} for troubleshooting"
+      
+      # Log script size and last few lines for debugging
+      log_error "Generated script size: $(wc -l < "$script_path") lines"
+      log_error "Last 10 lines of script for debugging:"
+      tail -10 "$script_path" | while IFS= read -r line; do
+        log_error "  $line"
+      done
+      
+      return 1
+    fi
+    
+    log_info "Watchdog script validation successful"
+    return 0
+  }
+  
+  # Function to load and verify LaunchDaemon
+  load_and_verify_daemon() {
+    local daemon_path="$1"
+    local daemon_label="$2"
+    local max_attempts=3
+    local attempt=1
+    
+    log_info "Loading LaunchDaemon: $daemon_label (path: $daemon_path)"
+    
+    # First verify the daemon file exists
+    if [ ! -f "$daemon_path" ]; then
+      log_error "LaunchDaemon file does not exist: $daemon_path"
+      return 1
+    fi
+    
+    # Try to load the daemon
+    while [ $attempt -le $max_attempts ]; do
+      log_info "Loading attempt $attempt/$max_attempts..."
+      
+      # Try multiple loading methods
+      sudo launchctl load "$daemon_path" 2>/dev/null || 
+      sudo launchctl bootstrap system "$daemon_path" 2>/dev/null ||
+      sudo launchctl kickstart system/"$daemon_label" 2>/dev/null
+      
+      # Verify if it was loaded successfully
+      sleep 1
+      if sudo launchctl list | grep -q "$daemon_label"; then
+        log_info "✅ Successfully loaded and verified LaunchDaemon: $daemon_label"
+        return 0
+      fi
+      
+      log_warn "Load attempt $attempt failed, retrying..."
+      sleep 2
+      attempt=$((attempt+1))
+    done
+    
+    log_error "⚠️ Failed to load LaunchDaemon after $max_attempts attempts"
+    return 1
+  }
   
   # IMPORTANT: Use 'EOT' instead of 'EOF' to allow variable replacement in the script template
   # Create the watchdog script with more reliable heredoc
@@ -2302,74 +2620,74 @@ DIALOG_POSITION="__DIALOG_POSITION__"
 
 # Function to create trigger file mutex
 init_trigger_mutex() {
-  # Create a flag to indicate watchdog is ready
-  WATCHDOG_READY_FLAG="/var/tmp/erase-install-watchdog-ready-${RUN_ID}"
-  
-  # Wait a moment for proper initialization
-  sleep 1
-  
-  # Create the ready flag
-  touch "${WATCHDOG_READY_FLAG}"
-  log_message "Watchdog initialization complete, ready for trigger file"
-  
-  # Check if UI is already running
-  local ui_start_flag="/var/tmp/erase-install-ui-starting-${RUN_ID}"
-  if [ -f "$ui_start_flag" ]; then
-    log_message "Detected UI already started, extending wait time"
-    # Extend wait time if UI is already running
-    MAX_WAIT=300
-  fi
-  
-  # Clean up flag on exit
-  trap 'rm -f "${WATCHDOG_READY_FLAG}" 2>/dev/null' EXIT
+# Create a flag to indicate watchdog is ready
+WATCHDOG_READY_FLAG="/var/tmp/erase-install-watchdog-ready-${RUN_ID}"
+
+# Wait a moment for proper initialization
+sleep 1
+
+# Create the ready flag
+touch "${WATCHDOG_READY_FLAG}"
+log_message "Watchdog initialization complete, ready for trigger file"
+
+# Check if UI is already running
+local ui_start_flag="/var/tmp/erase-install-ui-starting-${RUN_ID}"
+if [ -f "$ui_start_flag" ]; then
+log_message "Detected UI already started, extending wait time"
+# Extend wait time if UI is already running
+MAX_WAIT=300
+fi
+
+# Clean up flag on exit
+trap 'rm -f "${WATCHDOG_READY_FLAG}" 2>/dev/null' EXIT
 }
 
 # Function to log with timestamp
 log_message() {
-  # First parameter is the message
-  local message="$1"
-  # Second optional parameter is log level (INFO, WARN, ERROR)
-  local level="${2:-INFO}"
-  
-  # Create log entry with timestamp
-  local log_entry="[$level] [$(date '+%Y-%m-%d %H:%M:%S')] $message"
-  
-  # Ensure log file directory exists
-  mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-  
-  # Write to log file with error handling
-  echo "$log_entry" >> "$LOG_FILE" 2>/dev/null || true
-  
-  # Also log to system.log for easier debugging with error handling
-  if [ -n "$message" ]; then
-    logger -t "erase-install-watchdog-${RUN_ID}" "$message" 2>/dev/null || true
-  else
-    logger -t "erase-install-watchdog-${RUN_ID}" "empty-message" 2>/dev/null || true
-  fi
-  
-  # If this is an ERROR level message, also send to stderr
-  if [ "$level" = "ERROR" ]; then
-    echo "$log_entry" >&2
-  fi
+# First parameter is the message
+local message="$1"
+# Second optional parameter is log level (INFO, WARN, ERROR)
+local level="${2:-INFO}"
+
+# Create log entry with timestamp
+local log_entry="[$level] [$(date '+%Y-%m-%d %H:%M:%S')] $message"
+
+# Ensure log file directory exists
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+
+# Write to log file with error handling
+echo "$log_entry" >> "$LOG_FILE" 2>/dev/null || true
+
+# Also log to system.log for easier debugging with error handling
+if [ -n "$message" ]; then
+logger -t "erase-install-watchdog-${RUN_ID}" "$message" 2>/dev/null || true
+else
+logger -t "erase-install-watchdog-${RUN_ID}" "empty-message" 2>/dev/null || true
+fi
+
+# If this is an ERROR level message, also send to stderr
+if [ "$level" = "ERROR" ]; then
+echo "$log_entry" >&2
+fi
 }
 
 # Helper functions for different log levels
 log_info() {
-  log_message "$1" "INFO"
+log_message "$1" "INFO"
 }
 
 log_warn() {
-  log_message "$1" "WARN"
+log_message "$1" "WARN"
 }
 
 log_error() {
-  log_message "$1" "ERROR"
+log_message "$1" "ERROR"
 }
 
 log_debug() {
-  if [ "$DEBUG_MODE" = "true" ]; then
-    log_message "$1" "DEBUG"
-  fi
+if [ "$DEBUG_MODE" = "true" ]; then
+log_message "$1" "DEBUG"
+fi
 }
 
 # Initialize watchdog as early as possible
@@ -2382,500 +2700,504 @@ log_message "Trigger file will be: ${TRIGGER_FILE}"
 
 # Function to check if OS is already at or above the target version
 check_os_already_updated() {
-  # Get current OS version
-  local current_os=$(sw_vers -productVersion)
-  log_message "Current OS version: $current_os"
-  
-  # Get the target OS version from the plist
-  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null)
-  if [[ -z "$target_os" ]]; then
-    # If we don't have it stored, use INSTALLER_OS
-    target_os="${INSTALLER_OS}"
-    log_message "No stored target version found. Using INSTALLER_OS: $target_os"
-  else
-    log_message "Using stored target OS version: $target_os"
-  fi
-  
-  # Extract major versions
-  local current_major=$(echo "$current_os" | cut -d. -f1)
-  local target_major=$(echo "$target_os" | cut -d. -f1)
-  
-  # Compare major versions
-  if [[ $current_major -gt $target_major ]]; then
-    log_message "Current OS major version ($current_major) is greater than target major version ($target_major)"
-    return 0  # No update needed
-  elif [[ $current_major -lt $target_major ]]; then
-    log_message "Current OS major version ($current_major) is less than target major version ($target_major)"
-    return 1  # Update needed
-  else
-    # Major versions are equal, compare minor versions
-    log_message "Major versions are equal. Checking minor versions..."
-    
-    # Split versions by dots for comparison
-    IFS='.' read -ra CURRENT_VER <<< "$current_os"
-    IFS='.' read -ra TARGET_VER <<< "$target_os"
-    
-    # Compare each component
-    for ((i=1; i<${#CURRENT_VER[@]} && i<${#TARGET_VER[@]}; i++)); do
-      if [[ ${CURRENT_VER[i]} -gt ${TARGET_VER[i]} ]]; then
-        log_message "Current version component ${CURRENT_VER[i]} is greater than target ${TARGET_VER[i]} at position $i"
-        return 0  # No update needed
-      elif [[ ${CURRENT_VER[i]} -lt ${TARGET_VER[i]} ]]; then
-        log_message "Current version component ${CURRENT_VER[i]} is less than target ${TARGET_VER[i]} at position $i"
-        return 1  # Update needed
-      fi
-    done
-    
-    # If we get here, all compared components are equal
-    # If target has more components, check if they're significant
-    if [[ ${#TARGET_VER[@]} -gt ${#CURRENT_VER[@]} ]]; then
-      for ((i=${#CURRENT_VER[@]}; i<${#TARGET_VER[@]}; i++)); do
-        if [[ ${TARGET_VER[i]} -gt 0 ]]; then
-          log_message "Target version has additional significant component ${TARGET_VER[i]}"
-          return 1  # Update needed
-        fi
-      done
-    fi
-    
-    # If we get here, versions are compatible
-    log_message "Current version $current_os is compatible with target version $target_os"
-    return 0  # No update needed
-  fi
+# Get current OS version
+local current_os=$(sw_vers -productVersion)
+log_message "Current OS version: $current_os"
+
+# Get the target OS version from the plist
+local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null)
+if [[ -z "$target_os" ]]; then
+# If we don't have it stored, use INSTALLER_OS
+target_os="${INSTALLER_OS}"
+log_message "No stored target version found. Using INSTALLER_OS: $target_os"
+else
+log_message "Using stored target OS version: $target_os"
+fi
+
+# Extract major versions
+local current_major=$(echo "$current_os" | cut -d. -f1)
+local target_major=$(echo "$target_os" | cut -d. -f1)
+
+# Compare major versions
+if [[ $current_major -gt $target_major ]]; then
+log_message "Current OS major version ($current_major) is greater than target major version ($target_major)"
+return 0  # No update needed
+elif [[ $current_major -lt $target_major ]]; then
+log_message "Current OS major version ($current_major) is less than target major version ($target_major)"
+return 1  # Update needed
+else
+# Major versions are equal, compare minor versions
+log_message "Major versions are equal. Checking minor versions..."
+
+# Split versions by dots for comparison
+IFS='.' read -ra CURRENT_VER <<< "$current_os"
+IFS='.' read -ra TARGET_VER <<< "$target_os"
+
+# Compare each component
+for ((i=1; i<${#CURRENT_VER[@]} && i<${#TARGET_VER[@]}; i++)); do
+if [[ ${CURRENT_VER[i]} -gt ${TARGET_VER[i]} ]]; then
+log_message "Current version component ${CURRENT_VER[i]} is greater than target ${TARGET_VER[i]} at position $i"
+return 0  # No update needed
+elif [[ ${CURRENT_VER[i]} -lt ${TARGET_VER[i]} ]]; then
+log_message "Current version component ${CURRENT_VER[i]} is less than target ${TARGET_VER[i]} at position $i"
+return 1  # Update needed
+fi
+done
+
+# If we get here, all compared components are equal
+# If target has more components, check if they're significant
+if [[ ${#TARGET_VER[@]} -gt ${#CURRENT_VER[@]} ]]; then
+for ((i=${#CURRENT_VER[@]}; i<${#TARGET_VER[@]}; i++)); do
+if [[ ${TARGET_VER[i]} -gt 0 ]]; then
+  log_message "Target version has additional significant component ${TARGET_VER[i]}"
+  return 1  # Update needed
+fi
+done
+fi
+
+# If we get here, versions are compatible
+log_message "Current version $current_os is compatible with target version $target_os"
+return 0  # No update needed
+fi
 }
 
 # Function to check if OS was upgraded during deferral
 check_if_os_upgraded_during_deferral() {
-  log_message "Checking if OS was upgraded during deferral period..."
-  
-  # Get current OS version
-  local current_os=$(sw_vers -productVersion)
-  log_message "Current OS version: $current_os"
-  
-  # Get initial OS version when deferral started
-  local initial_os=$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "")
-  if [[ -z "$initial_os" ]]; then
-    log_message "No initial OS version recorded. Using current OS version."
-    initial_os="$current_os"
-  fi
-  log_message "Initial OS version (when deferred): $initial_os"
-  
-  # Get target OS version from plist
-  local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "")
-  if [[ -z "$target_os" ]]; then
-    log_message "No target OS version recorded. Using INSTALLER_OS value."
-    target_os="${INSTALLER_OS}"
-  fi
-  log_message "Target OS version: $target_os"
-  
-  # Extract version components
-  local current_major=$(echo "$current_os" | cut -d. -f1)
-  local initial_major=$(echo "$initial_os" | cut -d. -f1)
-  local target_major=$(echo "$target_os" | cut -d. -f1)
-  
-  # First, check if OS is already fully up-to-date compared to target
-  log_message "Performing exact version comparison..."
-  
-  # Split versions into components for detailed comparison
-  IFS='.' read -ra CURRENT_VER <<< "$current_os"
-  IFS='.' read -ra TARGET_VER <<< "$target_os"
-  
-  # Flag to track if we need to update
-  local needs_update=false
-  
-  # Check if major versions differ
-  if [[ ${CURRENT_VER[0]} -lt ${TARGET_VER[0]} ]]; then
-    log_message "Current major version (${CURRENT_VER[0]}) is less than target (${TARGET_VER[0]})"
-    needs_update=true
-  elif [[ ${CURRENT_VER[0]} -eq ${TARGET_VER[0]} ]]; then
-    # Major versions match, check minor/patch versions
-    log_message "Major versions match, checking minor versions..."
-    
-    # Compare each component after the major version
-    for ((i=1; i<${#CURRENT_VER[@]} && i<${#TARGET_VER[@]}; i++)); do
-      if [[ ${CURRENT_VER[i]} -lt ${TARGET_VER[i]} ]]; then
-        log_message "Current version component ${CURRENT_VER[i]} is less than target ${TARGET_VER[i]} at position $i"
-        needs_update=true
-        break
-      elif [[ ${CURRENT_VER[i]} -gt ${TARGET_VER[i]} ]]; then
-        log_message "Current version component ${CURRENT_VER[i]} is greater than target ${TARGET_VER[i]} at position $i"
-        break
-      fi
-      # If equal, continue to next component
-    done
-    
-    # If target has more components than current, check if they're significant
-    if [[ "$needs_update" == "false" && ${#TARGET_VER[@]} -gt ${#CURRENT_VER[@]} ]]; then
-      for ((i=${#CURRENT_VER[@]}; i<${#TARGET_VER[@]}; i++)); do
-        if [[ ${TARGET_VER[i]} -gt 0 ]]; then
-          log_message "Target version has additional significant component ${TARGET_VER[i]}"
-          needs_update=true
-          break
-        fi
-      done
-    fi
-  fi
-  
-  # If OS is already at or above target version, no update needed
-  if [[ "$needs_update" == "false" ]]; then
-    log_message "Current OS version ($current_os) is already at or above target version ($target_os)"
-    return 0  # No update needed
-  fi
-  
-  # At this point, we know the current version isn't fully up-to-date
-  log_message "Current OS version ($current_os) is not fully up-to-date compared to target ($target_os)"
-  
-  # Now check if a major upgrade occurred during deferral
-  if [[ "$current_major" -gt "$initial_major" ]]; then
-    log_message "Major OS upgrade detected during deferral (from $initial_os to $current_os)"
-    
-    # Policy decision: Proceed with update even after major upgrade to ensure full update
-    log_message "Although user performed major upgrade, current version isn't at latest minor version"
-    log_message "Proceeding with update to ensure system is fully up-to-date"
-    return 1  # Proceed with update
-  else
-    # No major upgrade detected, update is needed
-    log_message "No major OS upgrade detected. Update is needed."
-    return 1  # Update needed
-  fi
+log_message "Checking if OS was upgraded during deferral period..."
+
+# Get current OS version
+local current_os=$(sw_vers -productVersion)
+log_message "Current OS version: $current_os"
+
+# Get initial OS version when deferral started
+local initial_os=$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "")
+if [[ -z "$initial_os" ]]; then
+log_message "No initial OS version recorded. Using current OS version."
+initial_os="$current_os"
+fi
+log_message "Initial OS version (when deferred): $initial_os"
+
+# Get target OS version from plist
+local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "")
+if [[ -z "$target_os" ]]; then
+log_message "No target OS version recorded. Using INSTALLER_OS value."
+target_os="${INSTALLER_OS}"
+fi
+log_message "Target OS version: $target_os"
+
+# Extract version components
+local current_major=$(echo "$current_os" | cut -d. -f1)
+local initial_major=$(echo "$initial_os" | cut -d. -f1)
+local target_major=$(echo "$target_os" | cut -d. -f1)
+
+# First, check if OS is already fully up-to-date compared to target
+log_message "Performing exact version comparison..."
+
+# Split versions into components for detailed comparison
+IFS='.' read -ra CURRENT_VER <<< "$current_os"
+IFS='.' read -ra TARGET_VER <<< "$target_os"
+
+# Flag to track if we need to update
+local needs_update=false
+
+# Check if major versions differ
+if [[ ${CURRENT_VER[0]} -lt ${TARGET_VER[0]} ]]; then
+log_message "Current major version (${CURRENT_VER[0]}) is less than target (${TARGET_VER[0]})"
+needs_update=true
+elif [[ ${CURRENT_VER[0]} -eq ${TARGET_VER[0]} ]]; then
+# Major versions match, check minor/patch versions
+log_message "Major versions match, checking minor versions..."
+
+# Compare each component after the major version
+for ((i=1; i<${#CURRENT_VER[@]} && i<${#TARGET_VER[@]}; i++)); do
+if [[ ${CURRENT_VER[i]} -lt ${TARGET_VER[i]} ]]; then
+log_message "Current version component ${CURRENT_VER[i]} is less than target ${TARGET_VER[i]} at position $i"
+needs_update=true
+break
+elif [[ ${CURRENT_VER[i]} -gt ${TARGET_VER[i]} ]]; then
+log_message "Current version component ${CURRENT_VER[i]} is greater than target ${TARGET_VER[i]} at position $i"
+break
+fi
+# If equal, continue to next component
+done
+
+# If target has more components than current, check if they're significant
+if [[ "$needs_update" == "false" && ${#TARGET_VER[@]} -gt ${#CURRENT_VER[@]} ]]; then
+for ((i=${#CURRENT_VER[@]}; i<${#TARGET_VER[@]}; i++)); do
+if [[ ${TARGET_VER[i]} -gt 0 ]]; then
+  log_message "Target version has additional significant component ${TARGET_VER[i]}"
+  needs_update=true
+  break
+fi
+done
+fi
+fi
+
+# If OS is already at or above target version, no update needed
+if [[ "$needs_update" == "false" ]]; then
+log_message "Current OS version ($current_os) is already at or above target version ($target_os)"
+return 0  # No update needed
+fi
+
+# At this point, we know the current version isn't fully up-to-date
+log_message "Current OS version ($current_os) is not fully up-to-date compared to target ($target_os)"
+
+# Now check if a major upgrade occurred during deferral
+if [[ "$current_major" -gt "$initial_major" ]]; then
+log_message "Major OS upgrade detected during deferral (from $initial_os to $current_os)"
+
+# Policy decision: Proceed with update even after major upgrade to ensure full update
+log_message "Although user performed major upgrade, current version isn't at latest minor version"
+log_message "Proceeding with update to ensure system is fully up-to-date"
+return 1  # Proceed with update
+else
+# No major upgrade detected, update is needed
+log_message "No major OS upgrade detected. Update is needed."
+return 1  # Update needed
+fi
 }
 
 # Function to safely clean up all components
 cleanup_watchdog() {
-  # Create a unique identifier for this cleanup run
-  local cleanup_id="${RUN_ID}-$(date +%s)"
-  local cleanup_mutex="/var/tmp/erase-install-cleanup-${cleanup_id}.lock"
-  local cleanup_log="/var/log/erase-install-cleanup-${cleanup_id}.log"
-  
-  log_message "Starting coordinated cleanup with ID: ${cleanup_id}"
-  log_message "Cleanup log will be at: ${cleanup_log}"
-  
-  # Check if an abort daemon exists for this run ID
-  local abort_daemon_path="/Library/LaunchDaemons/com.macjediwizard.eraseinstall.abort.${RUN_ID}.plist"
-  local preserve_abort=false
-  
-  if [ -f "$abort_daemon_path" ]; then
-    log_message "Abort daemon detected for run ID ${RUN_ID} - will preserve during cleanup"
-    preserve_abort=true
-    
-    # Verify the daemon is loaded
-    if launchctl list | grep -q "com.macjediwizard.eraseinstall.abort.${RUN_ID}"; then
-      log_message "✓ Abort daemon is active in launchctl"
-    else
-      log_message "! Abort daemon exists but is not loaded - attempting to load it"
-      launchctl load "$abort_daemon_path" 2>>"${cleanup_log}" || true
-    fi
-  fi
-  
-  # Create mutex directory to prevent multiple simultaneous cleanups
-  if ! mkdir "${cleanup_mutex}" 2>/dev/null; then
-    log_message "WARNING: Another cleanup process appears to be running (${cleanup_mutex} exists)"
-    log_message "Will proceed anyway with caution"
-  fi
-  
-  # Perform initial cleanup in the current process
-  log_message "CLEANUP PHASE 1: Removing key components" | tee -a "${cleanup_log}"
-  
-  # Get the UID of the console user - with error handling
-  local console_uid=""
-  if [ -n "$CONSOLE_USER" ]; then
-    console_uid=$(id -u "$CONSOLE_USER" 2>/dev/null) || true
-    if [ -z "$console_uid" ]; then
-      log_message "WARNING: Could not get UID for $CONSOLE_USER, using fallback detection" | tee -a "${cleanup_log}"
-      console_uid=$(who | grep console | awk '{print $1}' | xargs id -u 2>/dev/null) || true
-    fi
-    log_message "Console user UID: $console_uid (for $CONSOLE_USER)" | tee -a "${cleanup_log}"
-  else
-    log_message "WARNING: No console user specified, cleanup may be incomplete" | tee -a "${cleanup_log}"
-  fi
-  
-  # CRITICAL: Stop any running erase-install processes first
-  if pgrep -f "erase-install.sh" >/dev/null; then
-    log_message "Stopping running erase-install processes" | tee -a "${cleanup_log}"
-    pkill -TERM -f "erase-install.sh" 2>/dev/null || true
-    sleep 1
-    # Force kill if still running
-    pkill -9 -f "erase-install.sh" 2>/dev/null || true
-  fi
-  
-  # Unload LaunchAgent if it exists and we have a console user
-  if [ -n "$AGENT_PATH" ] && [ -f "$AGENT_PATH" ] && [ -n "$console_uid" ]; then
-    log_message "Unloading UI LaunchAgent: $AGENT_LABEL" | tee -a "${cleanup_log}"
-    # Try multiple methods with proper error handling
-    launchctl asuser "$console_uid" sudo -u "$CONSOLE_USER" launchctl remove "$AGENT_LABEL" 2>>"${cleanup_log}" || true
-    launchctl asuser "$console_uid" sudo -u "$CONSOLE_USER" launchctl unload "$AGENT_PATH" 2>>"${cleanup_log}" || true
-    launchctl asuser "$console_uid" launchctl bootout gui/$console_uid/"$AGENT_LABEL" 2>>"${cleanup_log}" || true
-    
-    # Remove the agent file with proper error handling
-    log_message "Removing LaunchAgent file: $AGENT_PATH" | tee -a "${cleanup_log}"
-    rm -f "$AGENT_PATH" 2>>"${cleanup_log}" || true
-    if [ -f "$AGENT_PATH" ]; then
-      log_message "WARNING: Failed to remove $AGENT_PATH, will retry with elevated privileges" | tee -a "${cleanup_log}"
-      sudo rm -f "$AGENT_PATH" 2>>"${cleanup_log}" || true
-    fi
-  else
-    log_message "LaunchAgent path not found or not specified, skipping" | tee -a "${cleanup_log}"
-  fi
-  
-  # Remove helper script if it exists
-  if [ -n "$HELPER_SCRIPT" ] && [ -f "$HELPER_SCRIPT" ]; then
-    log_message "Removing helper script: $HELPER_SCRIPT" | tee -a "${cleanup_log}"
-    rm -f "$HELPER_SCRIPT" 2>>"${cleanup_log}" || true
-  fi
-  
-  # CLEANUP PHASE 2: Handle startosinstall daemon
-  log_message "CLEANUP PHASE 2: Checking for startosinstall daemon" | tee -a "${cleanup_log}"
-  
-  # Handle startosinstall daemon (MOST CRITICAL PART)
-  local startosinstall_plist="/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
-  if [ -f "$startosinstall_plist" ]; then
-    log_message "CRITICAL: Found startosinstall daemon - removing immediately" | tee -a "${cleanup_log}"
-    # Try multiple methods with proper error handling
-    launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>>"${cleanup_log}" || true
-    launchctl bootout system/"com.github.grahampugh.erase-install.startosinstall" 2>>"${cleanup_log}" || true
-    launchctl unload "$startosinstall_plist" 2>>"${cleanup_log}" || true
-    
-    # Remove the file with proper error handling
-    rm -f "$startosinstall_plist" 2>>"${cleanup_log}" || true
-    if [ -f "$startosinstall_plist" ]; then
-      log_message "WARNING: Failed to remove $startosinstall_plist, trying with elevated privileges" | tee -a "${cleanup_log}"
-      sudo rm -f "$startosinstall_plist" 2>>"${cleanup_log}" || true
-    fi
-    
-    # Verify if it's still present after all attempts
-    if [ -f "$startosinstall_plist" ]; then
-      log_message "ERROR: Failed to remove startosinstall plist after multiple attempts" | tee -a "${cleanup_log}"
-    else
-      log_message "Successfully removed startosinstall plist" | tee -a "${cleanup_log}"
-    fi
-  else
-    log_message "No startosinstall daemon found - good" | tee -a "${cleanup_log}"
-  fi
-  
-  # CLEANUP PHASE 3: Remove our own daemon if specified
-  if [ -n "$DAEMON_LABEL" ] && [ -n "$DAEMON_PATH" ]; then
-    log_message "CLEANUP PHASE 3: Unloading our LaunchDaemon: $DAEMON_LABEL" | tee -a "${cleanup_log}"
-    launchctl remove "$DAEMON_LABEL" 2>>"${cleanup_log}" || true
-    launchctl bootout system/"$DAEMON_LABEL" 2>>"${cleanup_log}" || true
-    launchctl unload "$DAEMON_PATH" 2>>"${cleanup_log}" || true
-    
-    # Remove daemon file
-    if [ -f "$DAEMON_PATH" ]; then
-      log_message "Removing daemon file: $DAEMON_PATH" | tee -a "${cleanup_log}"
-      rm -f "$DAEMON_PATH" 2>>"${cleanup_log}" || true
-      if [ -f "$DAEMON_PATH" ]; then
-        log_message "WARNING: Failed to remove $DAEMON_PATH, trying with elevated privileges" | tee -a "${cleanup_log}"
-        sudo rm -f "$DAEMON_PATH" 2>>"${cleanup_log}" || true
-      fi
-    fi
-  else
-    log_message "No daemon label/path specified, skipping daemon unload" | tee -a "${cleanup_log}"
-  fi
-  
-  # CLEANUP PHASE 4: Background process for additional cleanup
-  log_message "CLEANUP PHASE 4: Starting background cleanup process" | tee -a "${cleanup_log}"
-  
-  (
-    # Set up error handling for the background process
-    set -e
-    
-    # Add a delay to ensure other processes have completed
-    sleep 3
-    
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Background cleanup process started" >> "${cleanup_log}"
-    
-    # Store preserve_abort value for background process
-    local bg_preserve_abort="$preserve_abort"
-    local bg_abort_daemon_path="$abort_daemon_path"
-    
-    # Remove any temporary files
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Removing temporary files" >> "${cleanup_log}"
-    rm -f /var/tmp/dialog.* 2>/dev/null || true
-    rm -f /var/tmp/erase-install-ui-* 2>/dev/null || true
-    rm -f /var/tmp/erase-install-watchdog-* 2>/dev/null || true
-    
-    # FINAL SWEEP: Check for any remaining erase-install related daemons
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Final sweep for any remaining daemons" >> "${cleanup_log}"
-    for daemon_path in /Library/LaunchDaemons/com.macjediwizard.eraseinstall.*.plist /Library/LaunchDaemons/com.github.grahampugh.erase-install.*.plist; do
-      # Check if glob expanded properly (to avoid processing literal glob pattern)
-      if [ -e "$daemon_path" ]; then
-        # Skip abort daemon if we need to preserve it
-        if [ "$bg_preserve_abort" = "true" ] && [ "$daemon_path" = "$bg_abort_daemon_path" ]; then
-          echo "$(date '+%Y-%m-%d %H:%M:%S') Preserving abort daemon: $daemon_path" >> "${cleanup_log}"
-          continue
-        fi
-        
-        echo "$(date '+%Y-%m-%d %H:%M:%S') Found lingering daemon: $daemon_path" >> "${cleanup_log}"
-        daemon_label=$(basename "$daemon_path" .plist)
-        launchctl remove "$daemon_label" 2>/dev/null || true
-        rm -f "$daemon_path" 2>/dev/null || true
-      fi
-    done
-    
-    # Clean up any watchdog scripts in the Management directory
-    for script in /Library/Management/erase-install/erase-install-watchdog-*.sh; do
-      if [ -e "$script" ] && [ "$script" != "$WATCHDOG_SCRIPT" ]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') Removing lingering watchdog script: $script" >> "${cleanup_log}"
-        rm -f "$script" 2>/dev/null || true
-      fi
-    done
-    
-    # Remove self (watchdog script) at the very end
-    if [ -n "$WATCHDOG_SCRIPT" ] && [ -f "$WATCHDOG_SCRIPT" ]; then
-      echo "$(date '+%Y-%m-%d %H:%M:%S') Cleaning up watchdog script: $WATCHDOG_SCRIPT" >> "${cleanup_log}"
-      mv "$WATCHDOG_SCRIPT" "${WATCHDOG_SCRIPT}.removed" 2>/dev/null
-      rm -f "${WATCHDOG_SCRIPT}.removed" 2>/dev/null || true
-    fi
-    
-    # Remove mutex to signal completion
-    rm -rf "${cleanup_mutex}" 2>/dev/null || true
-    
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Background cleanup process completed successfully" >> "${cleanup_log}"
-  ) &
-  
-  # Make sure not to wait for the background process
-  disown $! 2>/dev/null || true
-  
-  log_message "Cleanup process initiated successfully, background process will continue"
-  
-  # Leave mutex in place for the background process to remove
-  return 0
+# Create a unique identifier for this cleanup run
+local cleanup_id="${RUN_ID}-$(date +%s)"
+local cleanup_mutex="/var/tmp/erase-install-cleanup-${cleanup_id}.lock"
+local cleanup_log="/var/log/erase-install-cleanup-${cleanup_id}.log"
+
+log_message "Starting coordinated cleanup with ID: ${cleanup_id}"
+log_message "Cleanup log will be at: ${cleanup_log}"
+
+# Check if an abort daemon exists for this run ID
+local abort_daemon_path="/Library/LaunchDaemons/com.macjediwizard.eraseinstall.abort.${RUN_ID}.plist"
+local preserve_abort=false
+
+if [ -f "$abort_daemon_path" ]; then
+log_message "Abort daemon detected for run ID ${RUN_ID} - will preserve during cleanup"
+preserve_abort=true
+
+# Verify the daemon is loaded
+if launchctl list | grep -q "com.macjediwizard.eraseinstall.abort.${RUN_ID}"; then
+log_message "✓ Abort daemon is active in launchctl"
+else
+log_message "! Abort daemon exists but is not loaded - attempting to load it"
+launchctl load "$abort_daemon_path" 2>>"${cleanup_log}" || true
+fi
+fi
+
+# Create mutex directory to prevent multiple simultaneous cleanups
+if ! mkdir "${cleanup_mutex}" 2>/dev/null; then
+log_message "WARNING: Another cleanup process appears to be running (${cleanup_mutex} exists)"
+log_message "Will proceed anyway with caution"
+fi
+
+# Perform initial cleanup in the current process
+log_message "CLEANUP PHASE 1: Removing key components" | tee -a "${cleanup_log}"
+
+# Get the UID of the console user - with error handling
+local console_uid=""
+if [ -n "$CONSOLE_USER" ]; then
+console_uid=$(id -u "$CONSOLE_USER" 2>/dev/null) || true
+if [ -z "$console_uid" ]; then
+log_message "WARNING: Could not get UID for $CONSOLE_USER, using fallback detection" | tee -a "${cleanup_log}"
+console_uid=$(who | grep console | awk '{print $1}' | xargs id -u 2>/dev/null) || true
+fi
+log_message "Console user UID: $console_uid (for $CONSOLE_USER)" | tee -a "${cleanup_log}"
+else
+log_message "WARNING: No console user specified, cleanup may be incomplete" | tee -a "${cleanup_log}"
+fi
+
+# CRITICAL: Stop any running erase-install processes first
+if pgrep -f "erase-install.sh" >/dev/null; then
+log_message "Stopping running erase-install processes" | tee -a "${cleanup_log}"
+pkill -TERM -f "erase-install.sh" 2>/dev/null || true
+sleep 1
+# Force kill if still running
+pkill -9 -f "erase-install.sh" 2>/dev/null || true
+fi
+
+# Unload LaunchAgent if it exists and we have a console user
+if [ -n "$AGENT_PATH" ] && [ -f "$AGENT_PATH" ] && [ -n "$console_uid" ]; then
+log_message "Unloading UI LaunchAgent: $AGENT_LABEL" | tee -a "${cleanup_log}"
+# Try multiple methods with proper error handling
+launchctl asuser "$console_uid" sudo -u "$CONSOLE_USER" launchctl remove "$AGENT_LABEL" 2>>"${cleanup_log}" || true
+launchctl asuser "$console_uid" sudo -u "$CONSOLE_USER" launchctl unload "$AGENT_PATH" 2>>"${cleanup_log}" || true
+launchctl asuser "$console_uid" launchctl bootout gui/$console_uid/"$AGENT_LABEL" 2>>"${cleanup_log}" || true
+
+# Remove the agent file with proper error handling
+log_message "Removing LaunchAgent file: $AGENT_PATH" | tee -a "${cleanup_log}"
+rm -f "$AGENT_PATH" 2>>"${cleanup_log}" || true
+if [ -f "$AGENT_PATH" ]; then
+log_message "WARNING: Failed to remove $AGENT_PATH, will retry with elevated privileges" | tee -a "${cleanup_log}"
+sudo rm -f "$AGENT_PATH" 2>>"${cleanup_log}" || true
+fi
+else
+log_message "LaunchAgent path not found or not specified, skipping" | tee -a "${cleanup_log}"
+fi
+
+# Remove helper script if it exists
+if [ -n "$HELPER_SCRIPT" ] && [ -f "$HELPER_SCRIPT" ]; then
+log_message "Removing helper script: $HELPER_SCRIPT" | tee -a "${cleanup_log}"
+rm -f "$HELPER_SCRIPT" 2>>"${cleanup_log}" || true
+fi
+
+# CLEANUP PHASE 2: Handle startosinstall daemon
+log_message "CLEANUP PHASE 2: Checking for startosinstall daemon" | tee -a "${cleanup_log}"
+
+# Handle startosinstall daemon (MOST CRITICAL PART)
+local startosinstall_plist="/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
+if [ -f "$startosinstall_plist" ]; then
+log_message "CRITICAL: Found startosinstall daemon - removing immediately" | tee -a "${cleanup_log}"
+# Try multiple methods with proper error handling
+launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>>"${cleanup_log}" || true
+launchctl bootout system/"com.github.grahampugh.erase-install.startosinstall" 2>>"${cleanup_log}" || true
+launchctl unload "$startosinstall_plist" 2>>"${cleanup_log}" || true
+
+# Remove the file with proper error handling
+rm -f "$startosinstall_plist" 2>>"${cleanup_log}" || true
+if [ -f "$startosinstall_plist" ]; then
+log_message "WARNING: Failed to remove $startosinstall_plist, trying with elevated privileges" | tee -a "${cleanup_log}"
+sudo rm -f "$startosinstall_plist" 2>>"${cleanup_log}" || true
+fi
+
+# Verify if it's still present after all attempts
+if [ -f "$startosinstall_plist" ]; then
+log_message "ERROR: Failed to remove startosinstall plist after multiple attempts" | tee -a "${cleanup_log}"
+else
+log_message "Successfully removed startosinstall plist" | tee -a "${cleanup_log}"
+fi
+else
+log_message "No startosinstall daemon found - good" | tee -a "${cleanup_log}"
+fi
+
+# CLEANUP PHASE 3: Remove our own daemon if specified
+if [ -n "$DAEMON_LABEL" ] && [ -n "$DAEMON_PATH" ]; then
+log_message "CLEANUP PHASE 3: Unloading our LaunchDaemon: $DAEMON_LABEL" | tee -a "${cleanup_log}"
+launchctl remove "$DAEMON_LABEL" 2>>"${cleanup_log}" || true
+launchctl bootout system/"$DAEMON_LABEL" 2>>"${cleanup_log}" || true
+launchctl unload "$DAEMON_PATH" 2>>"${cleanup_log}" || true
+
+# Remove daemon file
+if [ -f "$DAEMON_PATH" ]; then
+log_message "Removing daemon file: $DAEMON_PATH" | tee -a "${cleanup_log}"
+rm -f "$DAEMON_PATH" 2>>"${cleanup_log}" || true
+if [ -f "$DAEMON_PATH" ]; then
+log_message "WARNING: Failed to remove $DAEMON_PATH, trying with elevated privileges" | tee -a "${cleanup_log}"
+sudo rm -f "$DAEMON_PATH" 2>>"${cleanup_log}" || true
+fi
+fi
+else
+log_message "No daemon label/path specified, skipping daemon unload" | tee -a "${cleanup_log}"
+fi
+
+# CLEANUP PHASE 4: Background process for additional cleanup
+log_message "CLEANUP PHASE 4: Starting background cleanup process" | tee -a "${cleanup_log}"
+
+(
+# Set up error handling for the background process
+set -e
+
+# Add a delay to ensure other processes have completed
+sleep 3
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Background cleanup process started" >> "${cleanup_log}"
+
+# Store preserve_abort value for background process
+local bg_preserve_abort="$preserve_abort"
+local bg_abort_daemon_path="$abort_daemon_path"
+
+# Remove any temporary files
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removing temporary files" >> "${cleanup_log}"
+rm -f /var/tmp/dialog.* 2>/dev/null || true
+rm -f /var/tmp/erase-install-ui-* 2>/dev/null || true
+rm -f /var/tmp/erase-install-watchdog-* 2>/dev/null || true
+
+# FINAL SWEEP: Check for any remaining erase-install related daemons
+echo "$(date '+%Y-%m-%d %H:%M:%S') Final sweep for any remaining daemons" >> "${cleanup_log}"
+for daemon_path in /Library/LaunchDaemons/com.macjediwizard.eraseinstall.*.plist /Library/LaunchDaemons/com.github.grahampugh.erase-install.*.plist; do
+# Check if glob expanded properly (to avoid processing literal glob pattern)
+if [ -e "$daemon_path" ]; then
+# Skip abort daemon if we need to preserve it
+if [ "$bg_preserve_abort" = "true" ] && [ "$daemon_path" = "$bg_abort_daemon_path" ]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S') Preserving abort daemon: $daemon_path" >> "${cleanup_log}"
+  continue
+fi
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Found lingering daemon: $daemon_path" >> "${cleanup_log}"
+daemon_label=$(basename "$daemon_path" .plist)
+launchctl remove "$daemon_label" 2>/dev/null || true
+rm -f "$daemon_path" 2>/dev/null || true
+fi
+done
+
+# Clean up any watchdog scripts in the Management directory
+for script in /Library/Management/erase-install/erase-install-watchdog-*.sh; do
+if [ -e "$script" ] && [ "$script" != "$WATCHDOG_SCRIPT" ]; then
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removing lingering watchdog script: $script" >> "${cleanup_log}"
+rm -f "$script" 2>/dev/null || true
+fi
+done
+
+# Remove self (watchdog script) at the very end
+if [ -n "$WATCHDOG_SCRIPT" ] && [ -f "$WATCHDOG_SCRIPT" ]; then
+echo "$(date '+%Y-%m-%d %H:%M:%S') Cleaning up watchdog script: $WATCHDOG_SCRIPT" >> "${cleanup_log}"
+mv "$WATCHDOG_SCRIPT" "${WATCHDOG_SCRIPT}.removed" 2>/dev/null
+rm -f "${WATCHDOG_SCRIPT}.removed" 2>/dev/null || true
+fi
+
+# Remove mutex to signal completion
+rm -rf "${cleanup_mutex}" 2>/dev/null || true
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Background cleanup process completed successfully" >> "${cleanup_log}"
+) &
+
+# Make sure not to wait for the background process
+disown $! 2>/dev/null || true
+
+log_message "Cleanup process initiated successfully, background process will continue"
+
+# Leave mutex in place for the background process to remove
+return 0
 }
 
 # Add these after the cleanup_watchdog function
 verify_abort_schedule() {
-  local abort_daemon_label="$1"
-  
-  if launchctl list | grep -q "$abort_daemon_label"; then
-    log_message "✅ Abort schedule successfully loaded and active"
-    return 0
-  else
-    log_message "❌ Abort schedule not active in launchctl"
-    return 1
-  fi
+local abort_daemon_label="$1"
+
+if launchctl list | grep -q "$abort_daemon_label"; then
+log_message "✅ Abort schedule successfully loaded and active"
+return 0
+else
+log_message "❌ Abort schedule not active in launchctl"
+return 1
+fi
 }
 
 # Add a daemon file monitor to detect and remove startosinstall plist
 (
-  log_message "Starting startosinstall plist monitor"
-  while true; do
-    if [ -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist" ]; then
-      log_message "Detected startosinstall daemon - immediately removing"
-      launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
-      launchctl bootout system/com.github.grahampugh.erase-install.startosinstall 2>/dev/null
-      rm -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
-      log_message "Removed startosinstall daemon"
-    fi
-    sleep 2
-  done
+log_message "Starting startosinstall plist monitor"
+while true; do
+if [ -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist" ]; then
+log_message "Detected startosinstall daemon - immediately removing"
+launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
+launchctl bootout system/com.github.grahampugh.erase-install.startosinstall 2>/dev/null
+rm -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
+log_message "Removed startosinstall daemon"
+fi
+sleep 2
+done
 ) &
 
 # Special handling for defer mode
 if [ "$SCRIPT_MODE" = "defer" ]; then
-  log_info "Operating in defer mode - preparing to relaunch main script"
-  log_debug "WRAPPER_PATH: ${WRAPPER_PATH}"
-  log_debug "CONSOLE_USER: ${CONSOLE_USER}"
-  log_debug "EUID: $EUID"
-  log_debug "Current directory: $(pwd)"
-  
-  # Verify the main script exists
-  if [ ! -f "${WRAPPER_PATH}" ]; then
-    log_error "Main script not found at ${WRAPPER_PATH}!"
-    # Try to locate it
-    potential_paths=(
-      "/Library/Management/erase-install/erase-install-defer-wrapper.sh"
-      "/usr/local/bin/erase-install-defer-wrapper.sh"
-      "/Users/Shared/erase-install-defer-wrapper.sh"
-    )
-    for path in "${potential_paths[@]}"; do
-      if [ -f "$path" ]; then
-        log_info "Found main script at $path"
-        WRAPPER_PATH="$path"
-        break
-      fi
-    done
-  else
-    log_info "Verified main script exists at ${WRAPPER_PATH}"
-  fi
-  
-  sleep 3  # Brief pause
-  
-  # Create a temporary LaunchDaemon to run the main script
-  RELAUNCH_DAEMON_LABEL="com.macjediwizard.eraseinstall.relaunch.${RUN_ID}"
-  RELAUNCH_DAEMON_PATH="/Library/LaunchDaemons/${RELAUNCH_DAEMON_LABEL}.plist"
+log_info "Operating in defer mode - preparing to relaunch main script"
+log_debug "WRAPPER_PATH: ${WRAPPER_PATH}"
+log_debug "CONSOLE_USER: ${CONSOLE_USER}"
+log_debug "EUID: $EUID"
+log_debug "Current directory: $(pwd)"
 
-  log_info "Creating temporary LaunchDaemon to relaunch main script"
+# Verify the main script exists
+if [ ! -f "${WRAPPER_PATH}" ]; then
+log_error "Main script not found at ${WRAPPER_PATH}!"
+# Try to locate it
+potential_paths=(
+"/Library/Management/erase-install/erase-install-defer-wrapper.sh"
+"/usr/local/bin/erase-install-defer-wrapper.sh"
+"/Users/Shared/erase-install-defer-wrapper.sh"
+)
+for path in "${potential_paths[@]}"; do
+if [ -f "$path" ]; then
+log_info "Found main script at $path"
+WRAPPER_PATH="$path"
+break
+fi
+done
+else
+log_info "Verified main script exists at ${WRAPPER_PATH}"
+fi
 
-  # Create the plist content
-  cat > "$RELAUNCH_DAEMON_PATH" << LAUNCHDAEMONEOF
+sleep 3  # Brief pause
+
+# Create a temporary LaunchDaemon to run the main script
+RELAUNCH_DAEMON_LABEL="com.macjediwizard.eraseinstall.relaunch.${RUN_ID}"
+RELAUNCH_DAEMON_PATH="/Library/LaunchDaemons/${RELAUNCH_DAEMON_LABEL}.plist"
+
+# Update the activeRelaunchDaemon in the plist
+defaults write "${PLIST}" activeRelaunchDaemon -string "${RELAUNCH_DAEMON_LABEL}"
+log_info "Updated active relaunch daemon to: ${RELAUNCH_DAEMON_LABEL}"
+
+log_info "Creating temporary LaunchDaemon to relaunch main script"
+
+# Create the plist content
+cat > "$RELAUNCH_DAEMON_PATH" << LAUNCHDAEMONEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>${RELAUNCH_DAEMON_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${WRAPPER_PATH}</string>
-        <string>--from-abort-daemon</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>LaunchOnlyOnce</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/erase-install-wrapper-relaunch.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/erase-install-wrapper-relaunch.log</string>
-    <key>UserName</key>
-    <string>root</string>
-    <key>GroupName</key>
-    <string>wheel</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>ERASE_INSTALL_ABORT_DAEMON</key>
-        <string>true</string>
-    </dict>
+<key>Label</key>
+<string>${RELAUNCH_DAEMON_LABEL}</string>
+<key>ProgramArguments</key>
+<array>
+<string>${WRAPPER_PATH}</string>
+<string>--from-abort-daemon</string>
+</array>
+<key>RunAtLoad</key>
+<true/>
+<key>LaunchOnlyOnce</key>
+<true/>
+<key>StandardOutPath</key>
+<string>/var/log/erase-install-wrapper-relaunch.log</string>
+<key>StandardErrorPath</key>
+<string>/var/log/erase-install-wrapper-relaunch.log</string>
+<key>UserName</key>
+<string>root</string>
+<key>GroupName</key>
+<string>wheel</string>
+<key>EnvironmentVariables</key>
+<dict>
+<key>PATH</key>
+<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+<key>ERASE_INSTALL_ABORT_DAEMON</key>
+<string>true</string>
+</dict>
 </dict>
 </plist>
 LAUNCHDAEMONEOF
 
-  # Set proper permissions
-  chmod 644 "$RELAUNCH_DAEMON_PATH"
-  chown root:wheel "$RELAUNCH_DAEMON_PATH"
+# Set proper permissions
+chmod 644 "$RELAUNCH_DAEMON_PATH"
+chown root:wheel "$RELAUNCH_DAEMON_PATH"
 
-  # Load the LaunchDaemon
-  log_info "Loading relaunch LaunchDaemon"
-  launchctl load "$RELAUNCH_DAEMON_PATH"
+# Load the LaunchDaemon
+log_info "Loading relaunch LaunchDaemon"
+launchctl load "$RELAUNCH_DAEMON_PATH"
 
-  # Wait for it to start
-  log_info "Waiting 5 seconds for main script to start"
-  sleep 5
+# Wait for it to start
+log_info "Waiting 5 seconds for main script to start"
+sleep 5
 
-  # Check if main script is running
-  if pgrep -f "${WRAPPER_PATH}" >/dev/null; then
-    log_info "Main script is running after LaunchDaemon load"
-  else
-    log_warn "Main script may not have started properly, trying direct execution"
-    
-    # Fallback: Try direct execution if LaunchDaemon didn't work
-    if [ $EUID -eq 0 ]; then
-      log_info "Executing main script directly as root"
-      "${WRAPPER_PATH}" > /var/log/erase-install-wrapper-relaunch-${RUN_ID}.log 2>&1 &
-    else
-      log_info "Executing main script directly as user"
-      sudo -u "$CONSOLE_USER" "${WRAPPER_PATH}" > /var/tmp/erase-install-wrapper-relaunch.log 2>&1 &
-    fi
-  fi
-  
-  # Clean up and exit
-  log_info "Cleaning up after launching main script"
-  cleanup_watchdog
-  exit 0
+# Check if main script is running
+if pgrep -f "${WRAPPER_PATH}" >/dev/null; then
+log_info "Main script is running after LaunchDaemon load"
+else
+log_warn "Main script may not have started properly, trying direct execution"
+
+# Fallback: Try direct execution if LaunchDaemon didn't work
+if [ $EUID -eq 0 ]; then
+log_info "Executing main script directly as root"
+"${WRAPPER_PATH}" > /var/log/erase-install-wrapper-relaunch-${RUN_ID}.log 2>&1 &
+else
+log_info "Executing main script directly as user"
+sudo -u "$CONSOLE_USER" "${WRAPPER_PATH}" > /var/tmp/erase-install-wrapper-relaunch.log 2>&1 &
+fi
+fi
+
+# Clean up and exit
+log_info "Cleaning up after launching main script"
+cleanup_watchdog
+exit 0
 elif [ "$SCRIPT_MODE" = "scheduled" ]; then
-  log_info "Operating in scheduled mode - waiting for trigger file"
-  # Continue with normal watchdog functionality for scheduled installations
+log_info "Operating in scheduled mode - waiting for trigger file"
+# Continue with normal watchdog functionality for scheduled installations
 fi
 
 # Wait for trigger file or timeout
@@ -2883,419 +3205,422 @@ log_info "Waiting for trigger file: $TRIGGER_FILE (will wait up to $MAX_WAIT sec
 
 # Add more debugging info about the watchdog state
 if [ "$SCRIPT_MODE" = "scheduled" ]; then
-  log_info "Running in SCHEDULED mode - will wait for user to confirm via dialog"
-  log_debug "Helper script path: $HELPER_SCRIPT"
-  if [ -f "$HELPER_SCRIPT" ]; then
-    log_debug "Helper script exists: Yes"
-    ls -la "$HELPER_SCRIPT" | log_debug
-  else
-    log_debug "Helper script exists: No"
-  fi
-  
-  # Check for UI startup signal
-  UI_START_FLAG="/var/tmp/erase-install-ui-starting-${RUN_ID}"
-  if [ -f "$UI_START_FLAG" ]; then
-    log_info "Detected UI startup signal, UI helper is running"
-  else
-    log_warn "No UI startup signal detected, UI helper may not be running yet"
-  fi
+log_info "Running in SCHEDULED mode - will wait for user to confirm via dialog"
+log_debug "Helper script path: $HELPER_SCRIPT"
+if [ -f "$HELPER_SCRIPT" ]; then
+log_debug "Helper script exists: Yes"
+ls -la "$HELPER_SCRIPT" | log_debug
+else
+log_debug "Helper script exists: No"
+fi
+
+# Check for UI startup signal
+UI_START_FLAG="/var/tmp/erase-install-ui-starting-${RUN_ID}"
+if [ -f "$UI_START_FLAG" ]; then
+log_info "Detected UI startup signal, UI helper is running"
+else
+log_warn "No UI startup signal detected, UI helper may not be running yet"
+fi
 fi
 
 COUNTER=0
 while [ ! -f "$TRIGGER_FILE" ] && [ $COUNTER -lt $MAX_WAIT ]; do
-  # Check for abort file on each iteration
-  if [ -f "$ABORT_FILE" ]; then
-    log_info "Abort file detected during wait loop - breaking out to process abort"
-    break
-  fi
-  
-  # Periodically check and report status
-  if [ $((COUNTER % 30)) -eq 0 ] && [ $COUNTER -gt 0 ]; then
-    log_info "Still waiting for trigger file... ($COUNTER seconds elapsed)"
-    
-    # Check for any trigger files in the directory
-    if [ "$DEBUG_MODE" = "true" ]; then
-      log_debug "Looking for any trigger files in /var/tmp"
-      ls -la /var/tmp/erase-install-* 2>/dev/null | log_debug
-    fi
-    
-    # Check if UI has completed or is running
-    UI_COMPLETE_FLAG="/var/tmp/erase-install-ui-completed-${RUN_ID}"
-    if [ -f "$UI_COMPLETE_FLAG" ] && [ ! -f "$TRIGGER_FILE" ]; then
-      log_warn "UI completed but no trigger file was created - attempting to create one"
-      touch "$TRIGGER_FILE"
-      break
-    fi
-  fi
-  sleep $SLEEP_INTERVAL
-  COUNTER=$((COUNTER + SLEEP_INTERVAL))
+# Check for abort file on each iteration
+if [ -f "$ABORT_FILE" ]; then
+log_info "Abort file detected during wait loop - breaking out to process abort"
+break
+fi
+
+# Periodically check and report status
+if [ $((COUNTER % 30)) -eq 0 ] && [ $COUNTER -gt 0 ]; then
+log_info "Still waiting for trigger file... ($COUNTER seconds elapsed)"
+
+# Check for any trigger files in the directory
+if [ "$DEBUG_MODE" = "true" ]; then
+log_debug "Looking for any trigger files in /var/tmp"
+ls -la /var/tmp/erase-install-* 2>/dev/null | log_debug
+fi
+
+# Check if UI has completed or is running
+UI_COMPLETE_FLAG="/var/tmp/erase-install-ui-completed-${RUN_ID}"
+if [ -f "$UI_COMPLETE_FLAG" ] && [ ! -f "$TRIGGER_FILE" ]; then
+log_warn "UI completed but no trigger file was created - attempting to create one"
+touch "$TRIGGER_FILE"
+break
+fi
+fi
+sleep $SLEEP_INTERVAL
+COUNTER=$((COUNTER + SLEEP_INTERVAL))
 done
 
 # Check for abort file
 if [ -f "$ABORT_FILE" ]; then
-  log_message "Abort request detected, scheduling short-term deferral"
-  rm -f "$ABORT_FILE"
-  
-  # Increment abort count
-  abort_count=$(defaults read "$PLIST" abortCount 2>/dev/null || echo 0)
-  abort_count=$((abort_count + 1))
-  defaults write "$PLIST" abortCount -int "$abort_count"
-  log_message "Abort count incremented to $abort_count/$MAX_ABORTS"
-  
-  # Calculate new defer time (ABORT_DEFER_MINUTES from now)
-  current_hour=$(date +%H)
-  current_min=$(date +%M)
-  current_hour=$((10#$current_hour))
-  current_min=$((10#$current_min))
-  
-  # Add defer minutes
-  current_min=$((current_min + ABORT_DEFER_MINUTES))
-  
-  # Handle minute rollover
-  while [ $current_min -ge 60 ]; do
-    current_min=$((current_min - 60))
-    current_hour=$((current_hour + 1))
-  done
-  
-  # Handle hour rollover
-  if [ $current_hour -ge 24 ]; then
-    current_hour=$((current_hour - 24))
-    # Need tomorrow's date
-    defer_day=$(date -v+1d +%d)
-    defer_month=$(date -v+1d +%m)
-  else
-    # Use today's date
-    defer_day=$(date +%d)
-    defer_month=$(date +%m)
-  fi
-  
-  # Format with leading zeros
-  defer_hour=$(printf "%02d" $current_hour)
-  defer_min=$(printf "%02d" $current_min)
-  
-  log_message "Scheduling aborted installation to resume at $defer_hour:$defer_min"
-  
-  # Create a function to handle the LaunchDaemon creation to avoid using local outside of functions
-  create_abort_daemon() {
-    # Create a LaunchDaemon for the aborted installation
-    abort_daemon_label="com.macjediwizard.eraseinstall.abort.${RUN_ID}"
-    abort_daemon_path="/Library/LaunchDaemons/${abort_daemon_label}.plist"
-    
-    log_message "Creating abort LaunchDaemon to run at $defer_hour:$defer_min"
-    
-    # Create LaunchDaemon plist for the aborted installation
-    cat > "$abort_daemon_path" << ABORTDAEMON
+log_message "Abort request detected, scheduling short-term deferral"
+rm -f "$ABORT_FILE"
+
+# Increment abort count
+abort_count=$(defaults read "$PLIST" abortCount 2>/dev/null || echo 0)
+abort_count=$((abort_count + 1))
+defaults write "$PLIST" abortCount -int "$abort_count"
+log_message "Abort count incremented to $abort_count/$MAX_ABORTS"
+
+# Calculate new defer time (ABORT_DEFER_MINUTES from now)
+current_hour=$(date +%H)
+current_min=$(date +%M)
+current_hour=$((10#$current_hour))
+current_min=$((10#$current_min))
+
+# Add defer minutes
+current_min=$((current_min + ABORT_DEFER_MINUTES))
+
+# Handle minute rollover
+while [ $current_min -ge 60 ]; do
+current_min=$((current_min - 60))
+current_hour=$((current_hour + 1))
+done
+
+# Handle hour rollover
+if [ $current_hour -ge 24 ]; then
+current_hour=$((current_hour - 24))
+# Need tomorrow's date
+defer_day=$(date -v+1d +%d)
+defer_month=$(date -v+1d +%m)
+else
+# Use today's date
+defer_day=$(date +%d)
+defer_month=$(date +%m)
+fi
+
+# Format with leading zeros
+defer_hour=$(printf "%02d" $current_hour)
+defer_min=$(printf "%02d" $current_min)
+
+log_message "Scheduling aborted installation to resume at $defer_hour:$defer_min"
+
+# Create a function to handle the LaunchDaemon creation to avoid using local outside of functions
+create_abort_daemon() {
+# Create a LaunchDaemon for the aborted installation
+abort_daemon_label="com.macjediwizard.eraseinstall.abort.${RUN_ID}"
+abort_daemon_path="/Library/LaunchDaemons/${abort_daemon_label}.plist"
+
+log_message "Creating abort LaunchDaemon to run at $defer_hour:$defer_min"
+
+# Create LaunchDaemon plist for the aborted installation
+cat > "$abort_daemon_path" << ABORTDAEMON
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>${abort_daemon_label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${WRAPPER_PATH}</string>
-        <string>--no-reboot</string>
-        <string>--from-abort-daemon</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>${defer_hour}</integer>
-        <key>Minute</key>
-        <integer>${defer_min}</integer>
+<key>Label</key>
+<string>${abort_daemon_label}</string>
+<key>ProgramArguments</key>
+<array>
+<string>${WRAPPER_PATH}</string>
+<string>--no-reboot</string>
+<string>--from-abort-daemon</string>
+</array>
+<key>StartCalendarInterval</key>
+<dict>
+<key>Hour</key>
+<integer>${defer_hour}</integer>
+<key>Minute</key>
+<integer>${defer_min}</integer>
 $([ -n "${defer_day}" ] && printf "        <key>Day</key>\n        <integer>%d</integer>\n" "${defer_day}")
 $([ -n "${defer_month}" ] && printf "        <key>Month</key>\n        <integer>%d</integer>\n" "${defer_month}")
-    </dict>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>LaunchOnlyOnce</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/erase-install-wrapper-abort-reschedule.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/erase-install-wrapper-abort-reschedule.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>ERASE_INSTALL_ABORT_DAEMON</key>
-        <string>true</string>
-    </dict>
+</dict>
+<key>RunAtLoad</key>
+<false/>
+<key>LaunchOnlyOnce</key>
+<true/>
+<key>StandardOutPath</key>
+<string>/var/log/erase-install-wrapper-abort-reschedule.log</string>
+<key>StandardErrorPath</key>
+<string>/var/log/erase-install-wrapper-abort-reschedule.log</string>
+<key>EnvironmentVariables</key>
+<dict>
+<key>PATH</key>
+<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+<key>ERASE_INSTALL_ABORT_DAEMON</key>
+<string>true</string>
+</dict>
 </dict>
 </plist>
 ABORTDAEMON
-    
-    # Set proper permissions
-    if [ -f "$abort_daemon_path" ]; then
-      chmod 644 "$abort_daemon_path"
-      chown root:wheel "$abort_daemon_path"
-      log_message "Successfully created abort LaunchDaemon at: $abort_daemon_path"
-      return 0
-    else
-      log_message "ERROR: Failed to create abort LaunchDaemon"
-      return 1
-    fi
-  }
-  
-  # Call the function to create the daemon
-  if create_abort_daemon; then
-    # Load the LaunchDaemon
-    log_message "Loading abort LaunchDaemon $abort_daemon_label"
-    launchctl load "$abort_daemon_path" 2>/dev/null
 
-    # Verify schedule was loaded
-    verify_abort_schedule "$abort_daemon_label"
-    
-    # Check if loading was successful
-    if launchctl list | grep -q "$abort_daemon_label"; then
-      log_message "Successfully loaded abort LaunchDaemon"
-    else
-      log_message "WARNING: Failed to load abort LaunchDaemon, trying alternative method"
-      # Try alternative loading method
-      launchctl bootstrap system "$abort_daemon_path" 2>/dev/null
+# Set proper permissions
+if [ -f "$abort_daemon_path" ]; then
+chmod 644 "$abort_daemon_path"
+chown root:wheel "$abort_daemon_path"
+log_message "Successfully created abort LaunchDaemon at: $abort_daemon_path"
+return 0
+else
+log_message "ERROR: Failed to create abort LaunchDaemon"
+return 1
+fi
+}
 
-      # Verify schedule was loaded
-      verify_abort_schedule "$abort_daemon_label"
-    fi
-  else
-    log_message "ERROR: Unable to create abort daemon, cleanup will proceed without rescheduling"
-  fi
-  
-  # Notify user
-  osascript -e "display notification \"Installation rescheduled for $defer_hour:$defer_min\" with title \"macOS Upgrade Aborted\"" 2>/dev/null || true
-  
-  # Clean up and exit
-  cleanup_watchdog
-  exit 0
+# Call the function to create the daemon
+if create_abort_daemon; then
+# Load the LaunchDaemon
+log_message "Loading abort LaunchDaemon $abort_daemon_label"
+launchctl load "$abort_daemon_path" 2>/dev/null
+
+# Verify schedule was loaded
+verify_abort_schedule "$abort_daemon_label"
+
+# Check if loading was successful
+if launchctl list | grep -q "$abort_daemon_label"; then
+log_message "Successfully loaded abort LaunchDaemon"
+else
+log_message "WARNING: Failed to load abort LaunchDaemon, trying alternative method"
+# Try alternative loading method
+launchctl bootstrap system "$abort_daemon_path" 2>/dev/null
+
+# Verify schedule was loaded
+verify_abort_schedule "$abort_daemon_label"
+fi
+else
+log_message "ERROR: Unable to create abort daemon, cleanup will proceed without rescheduling"
+fi
+
+# Notify user
+osascript -e "display notification \"Installation rescheduled for $defer_hour:$defer_min\" with title \"macOS Upgrade Aborted\"" 2>/dev/null || true
+
+# Clean up and exit
+cleanup_watchdog
+exit 0
 fi
 
 # Verify if the trigger file was created
 if [ -f "$TRIGGER_FILE" ]; then
-  log_info "✅ Trigger file found at: $TRIGGER_FILE"
-  # Get file info for debugging
-  ls -la "$TRIGGER_FILE" >> "$LOG_FILE" 2>&1
+log_info "✅ Trigger file found at: $TRIGGER_FILE"
+# Get file info for debugging
+ls -la "$TRIGGER_FILE" >> "$LOG_FILE" 2>&1
 else
-  log_warn "❌ Trigger file not found after waiting $COUNTER seconds"
-  # Check the directory
-  log_info "Looking for any files in trigger directory..."
-  ls -la "$(dirname "$TRIGGER_FILE")" | grep "erase-install" >> "$LOG_FILE" 2>&1
+log_warn "❌ Trigger file not found after waiting $COUNTER seconds"
+# Check the directory
+log_info "Looking for any files in trigger directory..."
+ls -la "$(dirname "$TRIGGER_FILE")" | grep "erase-install" >> "$LOG_FILE" 2>&1
 fi
 
 # If trigger file exists, first check OS version, then run erase-install if needed
 if [ -f "$TRIGGER_FILE" ]; then
-  # Remove trigger file
-  rm -f "$TRIGGER_FILE"
-  log_message "Trigger file found, checking OS version before starting installation"
-  
-  # Check if OS was upgraded during deferral
-  if [[ "$SKIP_OS_VERSION_CHECK" == "true" ]]; then
-    log_message "===== DEFERRAL OS CHECK TEST MODE ====="
-    log_message "Test modes active: TEST_MODE=${TEST_MODE}, SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}"
-    
-    # Get current OS version
-    local current_os=$(sw_vers -productVersion)
-    log_message "Current OS version: $current_os"
-    
-    # Get initial and target OS versions
-    local initial_os=$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "$current_os")
-    local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "${INSTALLER_OS}")
-    log_message "Initial OS version (when deferred): $initial_os"
-    log_message "Target OS version: $target_os"
-    
-    # Run the deferral check
-    log_message "----- DEFERRAL VERSION CHECK TEST -----"
-    if check_if_os_upgraded_during_deferral; then
-      log_message "TEST RESULT: OS has been upgraded during deferral period or is already at target."
-      log_message "In normal mode, a scheduled installation would exit here."
-      log_message "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, installation will continue anyway."
-    else
-      log_message "TEST RESULT: OS has NOT been upgraded during deferral and needs update."
-    fi
-    
-    log_message "===== DEFERRAL OS CHECK TEST COMPLETE ====="
-    # Continue regardless of check result in test mode
-  elif check_if_os_upgraded_during_deferral; then
-    log_message "OS already updated to meet target version. No need to install. Exiting."
-    # Display a notification to the user
-    osascript -e 'display notification "Your macOS is already up to date. No installation required." with title "macOS Upgrade"'
-    # Clean up and exit
-    cleanup_watchdog
-    exit 0
-  fi
-  
-  # OS needs update, proceed with installation
-  log_message "OS needs to be updated. Preparing erase-install command..."
-  
-  # Show pre-authentication notice BEFORE starting erase-install
-  if [[ "${SHOW_AUTH_NOTICE}" == "true" ]]; then
-    log_message "Displaying pre-authentication notice"
-    
-    # Check if dialog exists
-    if [ ! -x "${DIALOG_PATH}" ]; then
-      log_warn "Dialog not found at ${DIALOG_PATH}, checking alternative locations"
-      for dialog_alt in "/usr/local/bin/dialog" "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog"; do
-        if [ -x "$dialog_alt" ]; then
-          log_info "Found dialog at $dialog_alt"
-          DIALOG_PATH="$dialog_alt"
-          break
-        fi
-      done
-    fi
-    
-    # For test mode, use a modified title
-    display_title="${AUTH_NOTICE_TITLE}"
-    [[ "$TEST_MODE" = true ]] && display_title="${AUTH_NOTICE_TITLE_TEST_MODE}"
-    
-    # Display the dialog
-    log_info "Executing dialog command for authentication notice"
-    "${DIALOG_PATH}" --title "${display_title}" \
-      --message "${AUTH_NOTICE_MESSAGE}" \
-      --button1text "${AUTH_NOTICE_BUTTON}" \
-      --icon "${AUTH_NOTICE_ICON}" \
-      --height ${AUTH_NOTICE_HEIGHT} \
-      --width ${AUTH_NOTICE_WIDTH} \
-      --moveable \
-      --position "${DIALOG_POSITION}"
-    
-    dialog_result=$?
-    log_info "Authentication notice dialog returned status $dialog_result"
-    
-    # Small pause to let user prepare
-    sleep 0.5
-    log_message "Pre-authentication notice completed, proceeding with installation"
-  fi
-  
-  # Build command arguments properly - FIX FOR THE EMPTY COMMAND ISSUE
-  CMD="$ERASE_INSTALL_PATH"
-  
-  # Add reinstall parameter
-  if [[ "$REINSTALL" == "true" ]]; then
-    log_message "Mode: Reinstall (not erase-install)"
-    CMD="$CMD --reinstall"
-  fi
-  
-  # Add reboot delay if specified
-  if [ "$REBOOT_DELAY" -gt 0 ]; then
-    log_message "Using reboot delay: $REBOOT_DELAY seconds"
-    CMD="$CMD --rebootdelay $REBOOT_DELAY"
-  fi
-  
-  # Add no filesystem option if enabled
-  if [ "$NO_FS" = true ]; then
-    log_message "File system check disabled (--no-fs)"
-    CMD="$CMD --no-fs"
-  fi
-  
-  # Add power check and wait limit if enabled
-  if [ "$CHECK_POWER" = true ]; then
-    log_message "Power check enabled: erase-install will verify power connection"
-    CMD="$CMD --check-power"
-    
-    if [ "$POWER_WAIT_LIMIT" -gt 0 ]; then
-      log_message "Power wait limit set to $POWER_WAIT_LIMIT seconds"
-      CMD="$CMD --power-wait-limit $POWER_WAIT_LIMIT"
-    else
-      log_message "Using default power wait limit (60 seconds)"
-    fi
-  else
-    log_message "Power check disabled: installation will proceed regardless of power status"
-  fi
-  
-  # Add minimum drive space
-  log_message "Minimum drive space: $MIN_DRIVE_SPACE GB"
-  CMD="$CMD --min-drive-space $MIN_DRIVE_SPACE"
-  
-  # Add cleanup option if enabled
-  if [ "$CLEANUP_AFTER_USE" = true ]; then
-    log_message "Cleanup after use enabled"
-    CMD="$CMD --cleanup-after-use"
-  fi
-  
-  # Add test mode if enabled
-  if [[ $TEST_MODE == true ]]; then
-    log_message "Test mode enabled"
-    CMD="$CMD --test-run"
-  fi
-  
-  # Add verbose logging if debug mode enabled
-  if [ "$DEBUG_MODE" = true ]; then
-    log_message "Verbose logging enabled for erase-install"
-    CMD="$CMD --verbose"
-  fi
-  
-  # Log command before no-reboot check
-  log_message "Command before no-reboot check: $CMD"
-  
-  # Add no-reboot override if enabled (highest safety priority)
-  # This should be last to override any other reboot settings
-  if [ "$PREVENT_ALL_REBOOTS" = "true" ]; then
-    log_message "SAFETY FEATURE: --no-reboot flag added to prevent any reboots"
-    CMD="$CMD --no-reboot"
-    log_message "VERIFIED: Final command with --no-reboot: $CMD"
-  elif [ "$TEST_MODE" = "true" ]; then
-    # Double safety check - always add no-reboot in test mode regardless of PREVENT_ALL_REBOOTS
-    log_message "SAFETY FEATURE: Adding --no-reboot flag because test mode is enabled"
-    CMD="$CMD --no-reboot"
-    log_message "VERIFIED: Final command with --no-reboot (test mode): $CMD"
-  fi
+# Remove trigger file
+rm -f "$TRIGGER_FILE"
+log_message "Trigger file found, checking OS version before starting installation"
 
-  # Safety check to verify test mode flag is correctly passed
-  if [ "$TEST_MODE" = "true" ] && [[ "$CMD" != *"--test-run"* ]]; then
-    log_message "CRITICAL SAFETY CHECK FAILED: Test mode enabled but --test-run missing from command"
-    log_message "Command was: $CMD"
-    log_message "Aborting installation to prevent unintended reboot"
-    exit 1
-  fi
+# Check if OS was upgraded during deferral
+if [[ "$SKIP_OS_VERSION_CHECK" == "true" ]]; then
+log_message "===== DEFERRAL OS CHECK TEST MODE ====="
+log_message "Test modes active: TEST_MODE=${TEST_MODE}, SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}"
 
-  # Execute the command with proper error handling
-  log_message "Command about to execute: $CMD"
-  log_message "PREVENT_ALL_REBOOTS value: $PREVENT_ALL_REBOOTS"
-  log_message "TEST_MODE value: $TEST_MODE"
-  
-  # Critical safety check - absolutely prevent reboots in test mode
-  if [[ "$TEST_MODE" = "true" && "$CMD" != *"--no-reboot"* ]]; then
-    log_message "CRITICAL SAFETY FAILURE: Test mode enabled but --no-reboot missing from command"
-    log_message "Adding --no-reboot as emergency safety measure"
-    CMD="$CMD --no-reboot"
-    log_message "Modified command: $CMD"
-  fi
-  
-  # Final verification - log full command
-  log_message "FINAL COMMAND TO EXECUTE: $CMD"
-  
-  # Add PATH to ensure binary can be found
-  export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-  
-  # Execute the command
-  eval "$CMD"
-  
-  # Save exit code with enhanced error handling
-  RESULT=$?
-  log_message "erase-install completed with exit code: $RESULT"
-  
-  # Enhanced error logging for power-related issues
-  if [ $RESULT -ne 0 ] && [ "$CHECK_POWER" = true ]; then
-    log_message "NOTE: Power checking was enabled with wait limit of $POWER_WAIT_LIMIT seconds"
-    log_message "If installation failed due to power issues, consider increasing the POWER_WAIT_LIMIT value"
-  fi
-  
-  # Clean up
-  cleanup_watchdog
-  
-  exit $RESULT
+# Get current OS version
+local current_os=$(sw_vers -productVersion)
+log_message "Current OS version: $current_os"
+
+# Get initial and target OS versions
+local initial_os=$(defaults read "${PLIST}" initialOSVersion 2>/dev/null || echo "$current_os")
+local target_os=$(defaults read "${PLIST}" targetOSVersion 2>/dev/null || echo "${INSTALLER_OS}")
+log_message "Initial OS version (when deferred): $initial_os"
+log_message "Target OS version: $target_os"
+
+# Run the deferral check
+log_message "----- DEFERRAL VERSION CHECK TEST -----"
+if check_if_os_upgraded_during_deferral; then
+log_message "TEST RESULT: OS has been upgraded during deferral period or is already at target."
+log_message "In normal mode, a scheduled installation would exit here."
+log_message "Since SKIP_OS_VERSION_CHECK=${SKIP_OS_VERSION_CHECK}, installation will continue anyway."
 else
-  # If timeout occurred, log an error
-  log_message "Timeout waiting for trigger file"
-  
-  # Clean up
-  cleanup_watchdog
-  
-  exit 1
+log_message "TEST RESULT: OS has NOT been upgraded during deferral and needs update."
+fi
+
+log_message "===== DEFERRAL OS CHECK TEST COMPLETE ====="
+# Continue regardless of check result in test mode
+elif check_if_os_upgraded_during_deferral; then
+log_message "OS already updated to meet target version. No need to install. Exiting."
+# Display a notification to the user
+osascript -e 'display notification "Your macOS is already up to date. No installation required." with title "macOS Upgrade"'
+# Clean up and exit
+cleanup_watchdog
+exit 0
+fi
+
+# OS needs update, proceed with installation
+log_message "OS needs to be updated. Preparing erase-install command..."
+
+# Show pre-authentication notice BEFORE starting erase-install
+if [[ "${SHOW_AUTH_NOTICE}" == "true" ]]; then
+log_message "Displaying pre-authentication notice"
+
+# Check if dialog exists
+if [ ! -x "${DIALOG_PATH}" ]; then
+log_warn "Dialog not found at ${DIALOG_PATH}, checking alternative locations"
+for dialog_alt in "/usr/local/bin/dialog" "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog"; do
+if [ -x "$dialog_alt" ]; then
+  log_info "Found dialog at $dialog_alt"
+  DIALOG_PATH="$dialog_alt"
+  break
+fi
+done
+fi
+
+# For test mode, use a modified title
+display_title="${AUTH_NOTICE_TITLE}"
+[[ "$TEST_MODE" = true ]] && display_title="${AUTH_NOTICE_TITLE_TEST_MODE}"
+
+# Display the dialog
+log_info "Executing dialog command for authentication notice"
+"${DIALOG_PATH}" --title "${display_title}" \
+--message "${AUTH_NOTICE_MESSAGE}" \
+--button1text "${AUTH_NOTICE_BUTTON}" \
+--icon "${AUTH_NOTICE_ICON}" \
+--height ${AUTH_NOTICE_HEIGHT} \
+--width ${AUTH_NOTICE_WIDTH} \
+--moveable \
+--position "${DIALOG_POSITION}"
+
+dialog_result=$?
+log_info "Authentication notice dialog returned status $dialog_result"
+
+# Small pause to let user prepare
+sleep 0.5
+log_message "Pre-authentication notice completed, proceeding with installation"
+fi
+
+# Build command arguments properly - FIX FOR THE EMPTY COMMAND ISSUE
+CMD="$ERASE_INSTALL_PATH"
+
+# Add reinstall parameter
+if [[ "$REINSTALL" == "true" ]]; then
+log_message "Mode: Reinstall (not erase-install)"
+CMD="$CMD --reinstall"
+fi
+
+# Add reboot delay if specified
+if [ "$REBOOT_DELAY" -gt 0 ]; then
+log_message "Using reboot delay: $REBOOT_DELAY seconds"
+CMD="$CMD --rebootdelay $REBOOT_DELAY"
+fi
+
+# Add no filesystem option if enabled
+if [ "$NO_FS" = true ]; then
+log_message "File system check disabled (--no-fs)"
+CMD="$CMD --no-fs"
+fi
+
+# Add power check and wait limit if enabled
+if [ "$CHECK_POWER" = true ]; then
+log_message "Power check enabled: erase-install will verify power connection"
+CMD="$CMD --check-power"
+
+if [ "$POWER_WAIT_LIMIT" -gt 0 ]; then
+log_message "Power wait limit set to $POWER_WAIT_LIMIT seconds"
+CMD="$CMD --power-wait-limit $POWER_WAIT_LIMIT"
+else
+log_message "Using default power wait limit (60 seconds)"
+fi
+else
+log_message "Power check disabled: installation will proceed regardless of power status"
+fi
+
+# Add minimum drive space
+log_message "Minimum drive space: $MIN_DRIVE_SPACE GB"
+CMD="$CMD --min-drive-space $MIN_DRIVE_SPACE"
+
+# Add cleanup option if enabled
+if [ "$CLEANUP_AFTER_USE" = true ]; then
+log_message "Cleanup after use enabled"
+CMD="$CMD --cleanup-after-use"
+fi
+
+# Add test mode if enabled
+if [[ $TEST_MODE == true ]]; then
+log_message "Test mode enabled"
+CMD="$CMD --test-run"
+fi
+
+# Add verbose logging if debug mode enabled
+if [ "$DEBUG_MODE" = true ]; then
+log_message "Verbose logging enabled for erase-install"
+CMD="$CMD --verbose"
+fi
+
+# Log command before no-reboot check
+log_message "Command before no-reboot check: $CMD"
+
+# Add no-reboot override if enabled (highest safety priority)
+# This should be last to override any other reboot settings
+if [ "$PREVENT_ALL_REBOOTS" = "true" ]; then
+log_message "SAFETY FEATURE: --no-reboot flag added to prevent any reboots"
+CMD="$CMD --no-reboot"
+log_message "VERIFIED: Final command with --no-reboot: $CMD"
+elif [ "$TEST_MODE" = "true" ]; then
+# Double safety check - always add no-reboot in test mode regardless of PREVENT_ALL_REBOOTS
+log_message "SAFETY FEATURE: Adding --no-reboot flag because test mode is enabled"
+CMD="$CMD --no-reboot"
+log_message "VERIFIED: Final command with --no-reboot (test mode): $CMD"
+fi
+
+# Safety check to verify test mode flag is correctly passed
+if [ "$TEST_MODE" = "true" ] && [[ "$CMD" != *"--test-run"* ]]; then
+log_message "CRITICAL SAFETY CHECK FAILED: Test mode enabled but --test-run missing from command"
+log_message "Command was: $CMD"
+log_message "Aborting installation to prevent unintended reboot"
+exit 1
+fi
+
+# Execute the command with proper error handling
+log_message "Command about to execute: $CMD"
+log_message "PREVENT_ALL_REBOOTS value: $PREVENT_ALL_REBOOTS"
+log_message "TEST_MODE value: $TEST_MODE"
+
+# Critical safety check - absolutely prevent reboots in test mode
+if [[ "$TEST_MODE" = "true" && "$CMD" != *"--no-reboot"* ]]; then
+log_message "CRITICAL SAFETY FAILURE: Test mode enabled but --no-reboot missing from command"
+log_message "Adding --no-reboot as emergency safety measure"
+CMD="$CMD --no-reboot"
+log_message "Modified command: $CMD"
+fi
+
+# Final verification - log full command
+log_message "FINAL COMMAND TO EXECUTE: $CMD"
+
+# Add PATH to ensure binary can be found
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+# Execute the command
+eval "$CMD"
+
+# Save exit code with enhanced error handling
+RESULT=$?
+log_message "erase-install completed with exit code: $RESULT"
+
+# Enhanced error logging for power-related issues
+if [ $RESULT -ne 0 ] && [ "$CHECK_POWER" = true ]; then
+log_message "NOTE: Power checking was enabled with wait limit of $POWER_WAIT_LIMIT seconds"
+log_message "If installation failed due to power issues, consider increasing the POWER_WAIT_LIMIT value"
+fi
+
+# Clean up
+cleanup_watchdog
+
+exit $RESULT
+else
+# If timeout occurred, log an error
+log_message "Timeout waiting for trigger file"
+
+# Clean up
+cleanup_watchdog
+
+exit 1
 fi
 EOT
-    
-  # Now replace all the placeholders in the script
-  # This method avoids variable expansion during the heredoc creation
+  
+  # Now perform variable replacements in a more reliable way
+  # Use a different delimiter for messages that might contain special characters
+  log_info "Performing variable substitutions in watchdog script..."
+  
+  # First, handle basic substitutions
   sed -i '' "s|__TRIGGER_FILE__|${trigger_file}|g" "$watchdog_script"
   sed -i '' "s|__RUN_ID__|${run_id}|g" "$watchdog_script"
   sed -i '' "s|__CONSOLE_USER__|${console_user}|g" "$watchdog_script"
@@ -3314,120 +3639,85 @@ EOT
   sed -i '' "s|__PLIST__|${PLIST}|g" "$watchdog_script"
   sed -i '' "s|__SCRIPT_MODE__|${mode}|g" "$watchdog_script"
   sed -i '' "s|__ABORT_FILE__|/var/tmp/erase-install-abort-${run_id}|g" "$watchdog_script"
-  # Add enhanced logging to debug the substitution
-  log_info "DEBUG: PREVENT_ALL_REBOOTS value before substitution: '${PREVENT_ALL_REBOOTS}'"
   
-  # Use explicit string replacement to avoid any issues with the variable
+  # Set boolean variables correctly to avoid string comparison issues
   if [[ "${PREVENT_ALL_REBOOTS}" == "true" ]]; then
     sed -i '' "s|__PREVENT_ALL_REBOOTS__|true|g" "$watchdog_script"
-    log_info "Set PREVENT_ALL_REBOOTS to 'true' in watchdog script"
   else
     sed -i '' "s|__PREVENT_ALL_REBOOTS__|false|g" "$watchdog_script"
-    log_info "Set PREVENT_ALL_REBOOTS to 'false' in watchdog script"
   fi
-  
-  # Enhanced debugging for critical parameters
-  log_info "SCRIPT DEBUG: Before substitution, parameters summary:"
-  log_info "SCRIPT DEBUG: PREVENT_ALL_REBOOTS='${PREVENT_ALL_REBOOTS}'"
-  log_info "SCRIPT DEBUG: TEST_MODE='${TEST_MODE}'"
-  log_info "SCRIPT DEBUG: REINSTALL='${REINSTALL}'"
-  log_info "SCRIPT DEBUG: Watchdog script path='${watchdog_script}'"
-  log_info "SCRIPT DEBUG: Run ID='${run_id}'"
   
   # erase-install parameters
   sed -i '' "s|__ERASE_INSTALL_PATH__|${SCRIPT_PATH}|g" "$watchdog_script"
   sed -i '' "s|__REBOOT_DELAY__|${REBOOT_DELAY}|g" "$watchdog_script"
-  sed -i '' "s|__REINSTALL__|${REINSTALL}|g" "$watchdog_script"
-  sed -i '' "s|__NO_FS__|${NO_FS}|g" "$watchdog_script"
-  sed -i '' "s|__CHECK_POWER__|${CHECK_POWER}|g" "$watchdog_script"
+  
+  # Boolean parameters need special handling
+  if [[ "${REINSTALL}" == "true" ]]; then
+    sed -i '' "s|__REINSTALL__|true|g" "$watchdog_script"
+  else
+    sed -i '' "s|__REINSTALL__|false|g" "$watchdog_script"
+  fi
+  
+  if [[ "${NO_FS}" == "true" ]]; then
+    sed -i '' "s|__NO_FS__|true|g" "$watchdog_script"
+  else
+    sed -i '' "s|__NO_FS__|false|g" "$watchdog_script"
+  fi
+  
+  if [[ "${CHECK_POWER}" == "true" ]]; then
+    sed -i '' "s|__CHECK_POWER__|true|g" "$watchdog_script"
+  else
+    sed -i '' "s|__CHECK_POWER__|false|g" "$watchdog_script"
+  fi
+  
+  if [[ "${CLEANUP_AFTER_USE}" == "true" ]]; then
+    sed -i '' "s|__CLEANUP_AFTER_USE__|true|g" "$watchdog_script"
+  else
+    sed -i '' "s|__CLEANUP_AFTER_USE__|false|g" "$watchdog_script"
+  fi
+  
+  if [[ "${TEST_MODE}" == "true" ]]; then
+    sed -i '' "s|__TEST_MODE__|true|g" "$watchdog_script"
+  else
+    sed -i '' "s|__TEST_MODE__|false|g" "$watchdog_script"
+  fi
+  
+  if [[ "${DEBUG_MODE}" == "true" ]]; then
+    sed -i '' "s|__DEBUG_MODE__|true|g" "$watchdog_script"
+  else
+    sed -i '' "s|__DEBUG_MODE__|false|g" "$watchdog_script"
+  fi
+  
   sed -i '' "s|__POWER_WAIT_LIMIT__|${POWER_WAIT_LIMIT}|g" "$watchdog_script"
   sed -i '' "s|__MIN_DRIVE_SPACE__|${MIN_DRIVE_SPACE}|g" "$watchdog_script"
-  sed -i '' "s|__CLEANUP_AFTER_USE__|${CLEANUP_AFTER_USE}|g" "$watchdog_script"
-  sed -i '' "s|__TEST_MODE__|${TEST_MODE}|g" "$watchdog_script"
-  sed -i '' "s|__DEBUG_MODE__|${DEBUG_MODE}|g" "$watchdog_script"
   
-  # Auth notice parameters
-  sed -i '' "s|__SHOW_AUTH_NOTICE__|${SHOW_AUTH_NOTICE}|g" "$watchdog_script"
-  sed -i '' "s|__AUTH_NOTICE_TITLE__|${AUTH_NOTICE_TITLE}|g" "$watchdog_script"
-  sed -i '' "s|__AUTH_NOTICE_TITLE_TEST_MODE__|${AUTH_NOTICE_TITLE_TEST_MODE}|g" "$watchdog_script"
-  sed -i '' "s|__AUTH_NOTICE_MESSAGE__|$(echo "${AUTH_NOTICE_MESSAGE}" | sed 's/[\/&]/\\&/g')|g" "$watchdog_script"
-  sed -i '' "s|__AUTH_NOTICE_BUTTON__|${AUTH_NOTICE_BUTTON}|g" "$watchdog_script"
-  sed -i '' "s|__AUTH_NOTICE_ICON__|${AUTH_NOTICE_ICON}|g" "$watchdog_script"
+  # Auth notice parameters - using different delimiter for message to avoid escaping issues
+  if [[ "${SHOW_AUTH_NOTICE}" == "true" ]]; then
+    sed -i '' "s|__SHOW_AUTH_NOTICE__|true|g" "$watchdog_script"
+  else
+    sed -i '' "s|__SHOW_AUTH_NOTICE__|false|g" "$watchdog_script"
+  fi
+  
+  # Use @ as delimiter for messages that might contain special characters
+  sed -i '' "s@__AUTH_NOTICE_TITLE__@${AUTH_NOTICE_TITLE}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_TITLE_TEST_MODE__@${AUTH_NOTICE_TITLE_TEST_MODE}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_MESSAGE__@${AUTH_NOTICE_MESSAGE}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_BUTTON__@${AUTH_NOTICE_BUTTON}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_ICON__@${AUTH_NOTICE_ICON}@g" "$watchdog_script"
   sed -i '' "s|__AUTH_NOTICE_HEIGHT__|${AUTH_NOTICE_HEIGHT}|g" "$watchdog_script"
   sed -i '' "s|__AUTH_NOTICE_WIDTH__|${AUTH_NOTICE_WIDTH}|g" "$watchdog_script"
-  sed -i '' "s|__DIALOG_PATH__|${DIALOG_BIN}|g" "$watchdog_script"
-  sed -i '' "s|__DIALOG_POSITION__|${DIALOG_POSITION}|g" "$watchdog_script"
+  sed -i '' "s@__DIALOG_PATH__@${DIALOG_BIN}@g" "$watchdog_script"
+  sed -i '' "s@__DIALOG_POSITION__@${DIALOG_POSITION}@g" "$watchdog_script"
   
-  sed -i '' "s|__ABORT_FILE__|/var/tmp/erase-install-abort-${run_id}|g" "$watchdog_script"
-  sed -i '' "s|__ABORT_DEFER_MINUTES__|${ABORT_DEFER_MINUTES}|g" "$watchdog_script"
-  sed -i '' "s|__MAX_ABORTS__|${MAX_ABORTS}|g" "$watchdog_script"
-  sed -i '' "s|__PLIST__|${PLIST}|g" "$watchdog_script"
-  sed -i '' "s|__SCRIPT_MODE__|${mode}|g" "$watchdog_script"
-  
-  # Add enhanced logging to debug the substitution
-  log_info "DEBUG: PREVENT_ALL_REBOOTS value before substitution: '${PREVENT_ALL_REBOOTS}'"
-  
-  # Use explicit string replacement to avoid any issues with the variable
-  if [[ "${PREVENT_ALL_REBOOTS}" == "true" ]]; then
-    sed -i '' "s|__PREVENT_ALL_REBOOTS__|true|g" "$watchdog_script"
-    log_info "Set PREVENT_ALL_REBOOTS to 'true' in watchdog script"
-  else
-    sed -i '' "s|__PREVENT_ALL_REBOOTS__|false|g" "$watchdog_script"
-    log_info "Set PREVENT_ALL_REBOOTS to 'false' in watchdog script"
-  fi  
-  
-  # Add verification of the substitution if debug mode is on
+  # Verify script substitutions in debug mode
   if [[ "${DEBUG_MODE}" == "true" ]]; then
-    log_info "SCRIPT DEBUG: Verifying PREVENT_ALL_REBOOTS substitution in watchdog script:"
-    if grep -q "PREVENT_ALL_REBOOTS=\"true\"" "$watchdog_script"; then
-      log_info "SCRIPT DEBUG: ✅ PREVENT_ALL_REBOOTS successfully set to 'true' in watchdog script"
-    elif grep -q "PREVENT_ALL_REBOOTS=\"false\"" "$watchdog_script"; then
-      log_info "SCRIPT DEBUG: ✅ PREVENT_ALL_REBOOTS successfully set to 'false' in watchdog script"
-    else
-      log_error "SCRIPT DEBUG: ❌ Failed to properly substitute PREVENT_ALL_REBOOTS in watchdog script"
-      grep "PREVENT_ALL_REBOOTS" "$watchdog_script" | head -1 | log_debug
-    fi
-    
-    # Also verify TEST_MODE substitution
-    if grep -q "TEST_MODE=\"true\"" "$watchdog_script"; then
-      log_info "SCRIPT DEBUG: ✅ TEST_MODE successfully set to 'true' in watchdog script"
-    elif grep -q "TEST_MODE=\"false\"" "$watchdog_script"; then
-      log_info "SCRIPT DEBUG: ✅ TEST_MODE successfully set to 'false' in watchdog script"
-    else
-      log_error "SCRIPT DEBUG: ❌ Failed to properly substitute TEST_MODE in watchdog script"
-    fi
+    verify_script_substitutions "$watchdog_script"
   fi
   
-  # Validate the generated watchdog script
-  log_info "Validating watchdog script integrity..."
-  if ! bash -n "$watchdog_script" 2>/dev/null; then
-    log_error "CRITICAL: Generated watchdog script contains syntax errors"
-    
-    # Create a backup for troubleshooting
-    watchdog_backup="${watchdog_script}.broken-$(date +%s)"
-    cp "$watchdog_script" "$watchdog_backup"
-    log_error "Created backup at ${watchdog_backup} for troubleshooting"
-    
-    # Log script size and last few lines for debugging
-    log_error "Generated script size: $(wc -l < "$watchdog_script") lines"
-    log_error "Last 10 lines of script for debugging:"
-    tail -10 "$watchdog_script" | while IFS= read -r line; do
-      log_error "  $line"
-    done
-    
-    # Return failure
+  # Validate the watchdog script for syntax errors
+  if ! validate_watchdog_script "$watchdog_script"; then
+    log_error "Failed to create a valid watchdog script. Aborting schedule creation."
     return 1
-  fi
-  
-  log_info "Watchdog script validation successful"
-  
-  # Use explicit string replacement to avoid any issues with the variable
-  if [[ "${PREVENT_ALL_REBOOTS}" == "true" ]]; then
-    sed -i '' "s|__PREVENT_ALL_REBOOTS__|true|g" "$watchdog_script"
-    log_info "Set PREVENT_ALL_REBOOTS to 'true' in watchdog script"
-  else
-    sed -i '' "s|__PREVENT_ALL_REBOOTS__|false|g" "$watchdog_script"
-    log_info "Set PREVENT_ALL_REBOOTS to 'false' in watchdog script"
   fi
   
   # Set proper permissions
@@ -3446,90 +3736,107 @@ EOT
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
-    <key>Label</key>
-    <string>${daemon_label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>${watchdog_script}</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>${hour_num}</integer>
-        <key>Minute</key>
-        <integer>${minute_num}</integer>
+<key>Label</key>
+<string>${daemon_label}</string>
+<key>ProgramArguments</key>
+<array>
+<string>/bin/bash</string>
+<string>${watchdog_script}</string>
+</array>
+<key>StartCalendarInterval</key>
+<dict>
+<key>Hour</key>
+<integer>${hour_num}</integer>
+<key>Minute</key>
+<integer>${minute_num}</integer>
 $([ -n "${day_num}" ] && printf "        <key>Day</key>\n        <integer>%d</integer>\n" "${day_num}")
 $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d</integer>\n" "${month_num}")
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/var/log/erase-install-wrapper.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/erase-install-wrapper.log</string>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>LaunchOnlyOnce</key>
-    <true/>
-    <key>AbandonProcessGroup</key>
-    <true/>
-    <key>UserName</key>
-    <string>root</string>
-    <key>GroupName</key>
-    <string>wheel</string>
+</dict>
+<key>StandardOutPath</key>
+<string>/var/log/erase-install-wrapper.log</string>
+<key>StandardErrorPath</key>
+<string>/var/log/erase-install-wrapper.log</string>
+<key>RunAtLoad</key>
+<false/>
+<key>LaunchOnlyOnce</key>
+<true/>
+<key>AbandonProcessGroup</key>
+<true/>
+<key>UserName</key>
+<string>root</string>
+<key>GroupName</key>
+<string>wheel</string>
 </dict>
 </plist>"
+  
+  # Determine whether to show UI based on mode
+  local show_ui=false
+  if [ "$mode" != "defer" ]; then
+    show_ui=true
+  fi
   
   # Only create and load UI agent if not in defer mode
   if [ "$show_ui" = true ]; then
     log_info "Creating LaunchAgent for UI display at $(printf '%02d:%02d' "${hour_num}" "${minute_num}")${day:+ on day $day_num}${month:+ month $month_num}"
     # Create the agent plist
     printf "%s" "${agent_content}" | sudo -u "$console_user" tee "$agent_path" > /dev/null
+    if [ $? -ne 0 ]; then
+      log_error "Failed to create LaunchAgent file at $agent_path"
+      return 1
+    fi
+    
     sudo -u "$console_user" chmod 644 "$agent_path"
     
-    # Load the agent
+    # Load the agent with improved error handling
     log_info "Loading LaunchAgent for UI..."
     if ! launchctl asuser "$(id -u "$console_user")" sudo -u "$console_user" launchctl bootstrap gui/"$(id -u "$console_user")" "$agent_path" 2>/dev/null; then
-      # Try legacy load method
-      launchctl asuser "$(id -u "$console_user")" sudo -u "$console_user" launchctl load "$agent_path"
+      log_warn "Failed to load agent with bootstrap method, trying legacy load method..."
+      if ! launchctl asuser "$(id -u "$console_user")" sudo -u "$console_user" launchctl load "$agent_path"; then
+        log_error "Failed to load LaunchAgent. The schedule may not work properly."
+      else
+        log_info "Successfully loaded LaunchAgent with legacy method"
+      fi
+    else
+      log_info "Successfully loaded LaunchAgent"
     fi
   else
     log_info "Defer mode - skipping UI agent creation"
   fi
   
-  # Always write the daemon plist
+  # Write the daemon plist
   printf "%s" "${daemon_content}" | sudo tee "$daemon_path" > /dev/null
+  if [ $? -ne 0 ]; then
+    log_error "Failed to create LaunchDaemon file at $daemon_path"
+    return 1
+  fi
+  
+  # Log the full daemon path for debugging
+  log_info "LaunchDaemon created at: $daemon_path"
+  
+  # Verify the daemon file exists
+  if [ ! -f "$daemon_path" ]; then
+    log_error "LaunchDaemon file does not exist after creation: $daemon_path"
+    # Check permissions and try again with sudo
+    log_info "Checking permissions and retrying..."
+    ls -la "$(dirname "$daemon_path")" | head -5 | log_debug
+    sudo printf "%s" "${daemon_content}" | sudo tee "$daemon_path" > /dev/null
+    
+    # Check again
+    if [ ! -f "$daemon_path" ]; then
+      log_error "LaunchDaemon file still does not exist after sudo attempt: $daemon_path"
+      return 1
+    else
+      log_info "Successfully created LaunchDaemon file with sudo"
+    fi
+  fi
+  
   # Ensure proper permissions
   sudo chown root:wheel "$daemon_path"
   sudo chmod 644 "$daemon_path"
   
-  # Load the daemon with better error handling and pause
-  log_info "Loading LaunchDaemon for installation..."
-  
-  # Add a pause to ensure previous unloading completes
-  log_info "Pausing briefly to ensure previous daemon is fully unloaded..."
-  sleep 3
-  
-  # Check if daemon file exists before attempting to load
-  if [ ! -f "$daemon_path" ]; then
-    log_error "LaunchDaemon file does not exist at: $daemon_path - cannot load it"
-    
-    # Check if directory is writeable
-    if [ ! -w "/Library/LaunchDaemons" ]; then
-      log_error "LaunchDaemons directory is not writeable - permissions issue"
-      ls -la /Library/LaunchDaemons/ | head -5 | log_debug
-    fi
-    
-    return 1
-  fi
-  
-  # Verify file
-  
-  # Verify daemon is loaded
-  sleep 1
-  if sudo launchctl list | grep -q "$daemon_label"; then
-    log_info "Verified LaunchDaemon is loaded"
-  else
-    log_warn "LaunchDaemon might not be properly loaded"
+  # Load and verify the daemon using our helper function
+  if ! load_and_verify_daemon "$daemon_path" "$daemon_label"; then
+    log_warn "Failed to load daemon properly, schedule may not work as expected"
   fi
   
   # Add debug info if debug mode enabled
@@ -4133,6 +4440,8 @@ show_preinstall() {
 
 # -------------- Prompt Handling --------------
 set_options() {
+  log_info "Setting dialog options based on deferral state..."
+  
   local defer_text
   if [[ "$TEST_MODE" == "true" ]]; then
     defer_text="Defer 5 Minutes   (TEST MODE)"
@@ -4146,9 +4455,24 @@ set_options() {
   if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
     OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT}"
     log_info "DEFERRAL_EXCEEDED=true - Removing defer option from dialog"
+    # Also log WHY it was exceeded for easier debugging
+    if (( deferCount >= MAX_DEFERS )); then
+      log_info "Defer option removed because max deferrals (${deferCount}/${MAX_DEFERS}) have been used"
+    else
+      local elapsed=$(($(date -u +%s) - firstDate))
+      log_info "Defer option removed because time limit exceeded: $(printf '%.1f' $((elapsed/3600.0))) hours elapsed"
+    fi
   else
     OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT},${defer_text}"
-    log_info "DEFERRAL_EXCEEDED=false - Including defer option in dialog: '${defer_text}'"
+    log_info "DEFERRAL_EXCEEDED=false - Including defer option: '${defer_text}' (${deferCount}/${MAX_DEFERS} deferrals used)"
+  fi
+  
+  # Verify option string was created correctly
+  if [[ -z "$OPTIONS" ]]; then
+    log_error "Failed to create options string - using fallback"
+    OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT}"
+  else
+    log_debug "Set options string to: $OPTIONS"
   fi
 }
 
@@ -4447,7 +4771,7 @@ show_prompt() {
     # Handle both normal and test mode defer options
     "${DIALOG_DEFER_TEXT}" | "${DIALOG_DEFER_TEXT_TEST_MODE}")
       if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
-        log_warn "Maximum deferrals (${MAX_DEFERS}) reached."
+        log_warn "Maximum deferrals (${MAX_DEFERS}) reached or time limit exceeded."
         reset_deferrals
         
         # Check if OS is already at the target version
@@ -4470,8 +4794,33 @@ show_prompt() {
         # Show countdown for installations after deferral expiry
         show_preinstall "true"
       else
+        # Track old deferCount for logging
+        local oldCount=$deferCount
         newCount=$((deferCount + 1))
+        
+        log_info "Incrementing deferral count from ${oldCount} to ${newCount}"
         defaults write "${PLIST}" deferCount -int "$newCount"
+        
+        # Verify the count was incremented and saved successfully
+        local verify_count
+        verify_count=$(defaults read "${PLIST}" deferCount 2>/dev/null || echo "ERROR")
+        if [[ "$verify_count" != "$newCount" ]]; then
+          log_error "Failed to save new deferral count (got: ${verify_count}, expected: ${newCount}) - check permissions on ${PLIST}"
+          # Try again with sudo if we have it
+          if command -v sudo &>/dev/null && [ "$EUID" -ne 0 ]; then
+            log_info "Attempting to use sudo to write deferral count"
+            sudo defaults write "${PLIST}" deferCount -int "$newCount"
+          fi
+          # Verify again
+          verify_count=$(defaults read "${PLIST}" deferCount 2>/dev/null || echo "ERROR")
+          if [[ "$verify_count" != "$newCount" ]]; then
+            log_error "Still failed to save deferral count after sudo attempt"
+          else
+            log_info "Successfully saved deferral count using sudo"
+          fi
+        else
+          log_info "Successfully saved new deferral count: ${newCount}"
+        fi
         
         if [[ "$TEST_MODE" == "true" ]]; then
           log_info "TEST MODE: Deferred for 5 minutes (${newCount}/${MAX_DEFERS})"
@@ -4531,19 +4880,57 @@ show_prompt() {
         else
           # Production mode: Use regular 24-hour deferral
           log_info "Regular 24-hour deferral mode"
-          local defer_hour; defer_hour=$(date -v+24H +%H)
-          local defer_min; defer_min=$(date -v+24H +%M)
-          local defer_day; defer_day=$(date -v+1d +%d)
-          local defer_month; defer_month=$(date -v+1d +%m)
+          
+          # Get current date/time components
+          local current_hour=$(date +%H)
+          local current_min=$(date +%M)
+          local current_day=$(date +%d)
+          local current_month=$(date +%m)
+          
+          # Convert to base-10 integers (handling leading zeros)
+          current_hour=$((10#$current_hour))
+          current_min=$((10#$current_min))
+          current_day=$((10#$current_day))
+          current_month=$((10#$current_month))
+          
+          # Same time tomorrow
+          local defer_day=$((current_day + 1))
+          local defer_month=$current_month
+          
+          # Handle month rollover - check max days in current month
+          local days_in_month=31
+          if [[ $current_month -eq 4 || $current_month -eq 6 || $current_month -eq 9 || $current_month -eq 11 ]]; then
+            days_in_month=30
+          elif [[ $current_month -eq 2 ]]; then
+            # February: check for leap year (simplified)
+            local year=$(date +%Y)
+            if (( year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) )); then
+              days_in_month=29
+            else
+              days_in_month=28
+            fi
+          fi
+          
+          # Adjust for month rollover
+          if [[ $defer_day -gt $days_in_month ]]; then
+            defer_day=1
+            defer_month=$((current_month + 1))
+            # Handle year rollover
+            if [[ $defer_month -gt 12 ]]; then
+              defer_month=1
+            fi
+          fi
+          
+          # Format back to strings with leading zeros
+          defer_hour=$(printf "%02d" $current_hour)
+          defer_min=$(printf "%02d" $current_min)
+          defer_day=$(printf "%02d" $defer_day)
+          defer_month=$(printf "%02d" $defer_month)
         fi
         
-        # Ensure clean state - preserve abort daemon if running from one
-        if [[ "$RUNNING_FROM_ABORT_DAEMON" == "true" ]]; then
-          log_info "Running from abort daemon - preserving abort daemons during cleanup"
-          remove_existing_launchdaemon "--preserve-abort-daemon"
-        else
-          remove_existing_launchdaemon
-        fi
+        # Important: Clean up all daemons EXCEPT the one stored in the plist
+        log_info "Removing existing LaunchDaemons while preserving active relaunch daemon"
+        remove_existing_launchdaemon
         
         # Add improved debugging for scheduling information
         log_debug "Scheduling info: hour=${defer_hour}, min=${defer_min}, day=${defer_day}, month=${defer_month}, mode=defer"
@@ -4559,6 +4946,16 @@ show_prompt() {
             if [[ -f "$expected_daemon_path" ]]; then
               log_info "Successfully verified scheduled LaunchDaemon exists at: $expected_daemon_path"
               
+              # Extra validation - check the contents of the daemon
+              local daemon_hour=$(defaults read "$expected_daemon_path" StartCalendarInterval | grep -A1 Hour | grep integer | awk '{print $1}' | tr -d '<integer>')
+              local daemon_minute=$(defaults read "$expected_daemon_path" StartCalendarInterval | grep -A1 Minute | grep integer | awk '{print $1}' | tr -d '<integer>')
+              
+              if [[ -n "$daemon_hour" && -n "$daemon_minute" ]]; then
+                log_info "Verified LaunchDaemon time settings: ${daemon_hour}:${daemon_minute}"
+              else
+                log_warn "Could not verify time settings in LaunchDaemon"
+              fi
+              
               # Check if daemon is loaded in launchctl
               local daemon_label="${LAUNCHDAEMON_LABEL}.watchdog.${CURRENT_RUN_ID}"
               if launchctl list | grep -q "$daemon_label"; then
@@ -4566,7 +4963,17 @@ show_prompt() {
               else
                 log_warn "LaunchDaemon file exists but may not be loaded: $daemon_label"
                 log_info "Attempting to load LaunchDaemon again..."
-                launchctl load "$expected_daemon_path" 2>/dev/null || log_warn "Failed to load daemon"
+                launchctl load "$expected_daemon_path" 2>/dev/null || true
+                
+                # Second verification
+                if launchctl list | grep -q "$daemon_label"; then
+                  log_info "Successfully loaded LaunchDaemon on second attempt: $daemon_label"
+                else
+                  log_warn "Failed to load LaunchDaemon after second attempt"
+                  # Try one more time with sudo
+                  log_info "Attempting to load with sudo..."
+                  sudo launchctl load "$expected_daemon_path" 2>/dev/null || true
+                fi
               fi
             else
               log_warn "LaunchDaemon file not found at expected path: $expected_daemon_path"
@@ -4581,21 +4988,35 @@ show_prompt() {
             # Base-10 conversion only for display
             local display_hour=$((10#${defer_hour}))
             local display_min=$((10#${defer_min}))
+            local display_day=$((10#${defer_day}))
+            local display_month=$((10#${defer_month}))
+            
             if [[ "$TEST_MODE" == "true" ]]; then
               log_info "TEST MODE: Scheduled re-prompt for $defer_hour:$defer_min (in approximately 5 minutes)"
+              log_info "Deferral count is now ${newCount} of ${MAX_DEFERS}"
               
               # Show a notification to the user if possible
               if [ -n "$console_user" ] && [ "$console_user" != "root" ] && [ -n "$console_uid" ]; then
-                launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e 'display notification "Due to test mode, the deferral is set for 5 minutes instead of 24 hours." with title "macOS Upgrade - Test Mode"'
+                launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e "display notification \"Test mode: Deferral ${newCount}/${MAX_DEFERS} scheduled for 5 minutes from now.\" with title \"macOS Upgrade Deferred\""
               fi
             else
-              log_info "Scheduled re-prompt for tomorrow at $(printf '%02d:%02d' "${display_hour}" "${display_min}")"
+              local formatted_date=$(date -j -f "%Y-%m-%d %H:%M:%S" "$(date +%Y)-${display_month}-${display_day} ${display_hour}:${display_min}:00" "+%a, %b %d at %I:%M %p" 2>/dev/null)
+              log_info "Scheduled re-prompt for ${formatted_date} (deferral ${newCount}/${MAX_DEFERS})"
+              
+              # Show a notification to the user if possible
+              if [ -n "$console_user" ] && [ "$console_user" != "root" ] && [ -n "$console_uid" ]; then
+                launchctl asuser "$console_uid" sudo -u "$console_user" osascript -e "display notification \"macOS upgrade deferred until ${formatted_date} (deferral ${newCount}/${MAX_DEFERS})\" with title \"macOS Upgrade Deferred\""
+              fi
             fi
           else
             log_error "LaunchDaemon creation appeared to succeed but verification failed"
             
             # Try direct retry with more permissions
             log_info "Attempting direct retry of LaunchDaemon creation..."
+            # Force cleanup first
+            remove_existing_launchdaemon
+            
+            # Try again with sudo if needed
             if create_scheduled_launchdaemon "${defer_hour}" "${defer_min}" "${defer_day}" "${defer_month}" "defer"; then
               log_info "Second attempt to create LaunchDaemon succeeded"
             else
@@ -5029,19 +5450,19 @@ fi
 
 # Enhanced function to detect if the script is being run by an abort daemon
 is_running_from_abort_daemon() {
-  # MOST RELIABLE: Check for our global early detection flag first
+  # Check for our global early detection flag first
   if [[ "$RUNNING_FROM_ABORT_DAEMON" == "true" ]]; then
     log_debug "Detected running from abort daemon via early detection flag"
     return 0  # True - already detected in early phase
   fi
   
-  # SECOND MOST RELIABLE: Check environment variable
+  # Check environment variable
   if [[ "${ERASE_INSTALL_ABORT_DAEMON:-}" == "true" ]]; then
     log_debug "Detected running from abort daemon via environment variable"
     return 0  # True - environment indicates we're from abort daemon
   fi
   
-  # THIRD MOST RELIABLE: Check command line arguments
+  # Check command line arguments
   for arg in "$@"; do
     if [[ "$arg" == "--from-abort-daemon" ]]; then
       log_debug "Detected running from abort daemon via command line argument"
@@ -5049,7 +5470,7 @@ is_running_from_abort_daemon() {
     fi
   done
   
-  # FOURTH MOST RELIABLE: Check if our parent process has "abort" in its command line
+  # Check if parent process has "abort" in its command line
   local parent_cmd=""
   if [ -n "$PPID" ]; then
     parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || echo "")
@@ -5059,16 +5480,38 @@ is_running_from_abort_daemon() {
     fi
   fi
   
-  # FIFTH MOST RELIABLE: Check our own process name/command
-  local own_cmd=""
-  own_cmd=$(ps -p $$ -o command= 2>/dev/null || echo "")
-  if [[ "$own_cmd" == *"com.macjediwizard.eraseinstall.abort"* ]]; then
-    log_debug "Detected running from abort daemon via own process command: $own_cmd"
-    return 0  # True - own process command contains abort daemon reference
+  # Not running from abort daemon
+  return 1
+}
+
+is_running_from_relaunch_daemon() {
+  # Check environment variable first
+  if [[ "${RUNNING_FROM_RELAUNCH_DAEMON:-}" == "true" ]]; then
+    log_debug "Detected running from relaunch daemon via environment variable"
+    return 0  # True - environment indicates we're from relaunch daemon
   fi
   
-  # None of the abort daemon detection methods succeeded
-  return 1  # False - not running from abort daemon
+  # Check command line arguments for relaunch flag
+  for arg in "$@"; do
+    if [[ "$arg" == "--from-relaunch-daemon" ]]; then
+      log_debug "Detected running from relaunch daemon via command line argument"
+      return 0  # True - explicit command line flag
+    fi
+  done
+  
+  # Check if parent process has "relaunch" in its command line
+  local parent_cmd=""
+  if [ -n "$PPID" ]; then
+    parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || echo "")
+    if [[ "$parent_cmd" == *"com.macjediwizard.eraseinstall.relaunch"* ]]; then
+      log_debug "Detected running from relaunch daemon via parent process: $parent_cmd"
+      export RUNNING_FROM_RELAUNCH_DAEMON=true
+      return 0  # True - running from relaunch daemon
+    fi
+  fi
+  
+  # Not running from relaunch daemon
+  return 1
 }
 
 # Main script execution for non-scheduled mode

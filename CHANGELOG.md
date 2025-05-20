@@ -3,6 +3,27 @@
 All notable changes to this project will be documented in this file.
 
 
+## 1.6.3 - 2025-05-19
+### Added
+- Comprehensive validation for watchdog script before execution
+- Enhanced verification of critical security parameters
+- Improved daemon loading with retry logic
+- Better verification of abort schedule daemon
+
+### Fixed
+- Local variable issues in cleanup background process
+- Inconsistent handling of abort daemon creation and loading
+- Improved cleanup process for orphaned daemons
+- Enhanced error handling during daemon creation
+
+### Changed
+- Refactored daemon loading process for better reliability
+- Improved parameter validation approach for watchdog scripts
+- Enhanced logging of critical operations for better debugging
+- Standardized daemon verification across defer and abort modes
+
+---
+
 ## [1.6.2] - 2025-05-19
 ### Added
 - Specialized test functions for different OS version check contexts
