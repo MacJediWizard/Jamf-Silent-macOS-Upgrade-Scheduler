@@ -31,8 +31,7 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
-# Changes in 1.6.3:
-#         - Improved reliability of LaunchDaemon creation and loading
+# v1.6.3 - Improved reliability of LaunchDaemon creation and loading
 #         - Added script validation for watchdog and abort daemons
 #         - Enhanced parameter verification to ensure critical settings are maintained
 #         - Fixed local variable issues in watchdog cleanup process
