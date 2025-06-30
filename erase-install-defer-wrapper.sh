@@ -1696,11 +1696,21 @@ EOF
 }
 
 reset_deferrals() {
-  log_info "Resetting deferral count."
+  log_info "Resetting deferral and abort counts."
   defaults write "${PLIST}" deferCount -int 0
+  defaults write "${PLIST}" abortCount -int 0
   defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
-  defaults write "${PLIST}" abortCount -int 0  # Add this line
-  log_info "Deferral and abort counts reset."
+  
+  # Update exported variables
+  export CURRENT_DEFER_COUNT=0
+  export CURRENT_ABORT_COUNT=0
+  export CURRENT_FIRST_DATE=$(date -u +%s)
+  export CURRENT_ELAPSED=0
+  export CAN_DEFER=true
+  export CAN_ABORT=true
+  export FORCE_INSTALL=false
+  
+  log_info "All counters reset successfully."
 }
 
 # Centralized state management for deferrals and aborts
@@ -1798,6 +1808,17 @@ get_installation_state() {
   return 0
 }
 
+# ADD THIS FUNCTION after get_installation_state():
+get_deferral_state() {
+  # Backward compatibility function - calls the new function
+  log_debug "get_deferral_state called - redirecting to get_installation_state"
+  get_installation_state
+  
+  # Export old-style variables for backward compatibility
+  export deferCount="$CURRENT_DEFER_COUNT"
+  export firstDate="$CURRENT_FIRST_DATE"
+}
+        
 # Increment defer count with validation
 increment_defer_count() {
   local old_count="$CURRENT_DEFER_COUNT"
@@ -4968,26 +4989,26 @@ set_options() {
   local defer_text
   if [[ "$TEST_MODE" == "true" ]]; then
     defer_text="Defer 5 Minutes   (TEST MODE)"
-    # Also set the variable for later use in case statement
     DIALOG_DEFER_TEXT_TEST_MODE="$defer_text"
   else
     defer_text="${DIALOG_DEFER_TEXT}"
   fi
   
-  # Log the deferral status clearly
-  if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
+  # Use the new state variables
+  if [[ "${FORCE_INSTALL}" = true ]]; then
     OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT}"
-    log_info "DEFERRAL_EXCEEDED=true - Removing defer option from dialog"
-    # Also log WHY it was exceeded for easier debugging
-    if (( deferCount >= MAX_DEFERS )); then
-      log_info "Defer option removed because max deferrals (${deferCount}/${MAX_DEFERS}) have been used"
+    log_info "FORCE_INSTALL=true - Removing defer option from dialog"
+    
+    # Log why it was exceeded for debugging
+    if (( CURRENT_DEFER_COUNT >= MAX_DEFERS )); then
+      log_info "Defer option removed because max deferrals (${CURRENT_DEFER_COUNT}/${MAX_DEFERS}) have been used"
     else
-      local elapsed=$(($(date -u +%s) - firstDate))
-      log_info "Defer option removed because time limit exceeded: $(printf '%.1f' $((elapsed/3600.0))) hours elapsed"
+      local elapsed_hours=$((CURRENT_ELAPSED / 3600))
+      log_info "Defer option removed because time limit exceeded: ${elapsed_hours} hours elapsed"
     fi
   else
     OPTIONS="${DIALOG_INSTALL_NOW_TEXT},${DIALOG_SCHEDULE_TODAY_TEXT},${defer_text}"
-    log_info "DEFERRAL_EXCEEDED=false - Including defer option: '${defer_text}' (${deferCount}/${MAX_DEFERS} deferrals used)"
+    log_info "FORCE_INSTALL=false - Including defer option: '${defer_text}' (${CURRENT_DEFER_COUNT}/${MAX_DEFERS} deferrals used)"
   fi
   
   # Verify option string was created correctly
@@ -5293,9 +5314,9 @@ show_prompt() {
     ;;
     # Handle both normal and test mode defer options
     "${DIALOG_DEFER_TEXT}" | "${DIALOG_DEFER_TEXT_TEST_MODE}")
-      if [[ "${DEFERRAL_EXCEEDED}" = true ]]; then
-        log_warn "Maximum deferrals (${MAX_DEFERS}) reached or time limit exceeded."
-        reset_deferrals
+      if [[ "${FORCE_INSTALL}" = true ]]; then
+        log_warn "Maximum deferrals (${MAX_DEFERS}) reached or time limit exceeded (used: ${CURRENT_DEFER_COUNT}/${MAX_DEFERS})."
+        reset_all_counters
         
         # Check if OS is already at the target version
         log_info "Checking if OS is already up-to-date before forced installation after max deferrals..."
@@ -5318,8 +5339,8 @@ show_prompt() {
         show_preinstall "true"
       else
         # Track old deferCount for logging
-        local oldCount=$deferCount
-        newCount=$((deferCount + 1))
+        local oldCount=$CURRENT_DEFER_COUNT
+        newCount=$((oldCount + 1))
         
         log_info "Incrementing deferral count from ${oldCount} to ${newCount}"
         defaults write "${PLIST}" deferCount -int "$newCount"
@@ -5973,40 +5994,40 @@ fi
 
 # Enhanced function to detect if the script is being run by an abort daemon
 is_running_from_abort_daemon() {
-  # Check for our global early detection flag first
+  # Check our early detection flag first (most reliable)
   if [[ "$RUNNING_FROM_ABORT_DAEMON" == "true" ]]; then
-    log_debug "Detected running from abort daemon via early detection flag"
-    return 0  # True - already detected in early phase
+    return 0
   fi
   
-  # Check environment variable
+  # Check environment variable (set by LaunchDaemon)
   if [[ "${ERASE_INSTALL_ABORT_DAEMON:-}" == "true" ]]; then
-    log_debug "Detected running from abort daemon via environment variable"
-    return 0  # True - environment indicates we're from abort daemon
+    log_debug "Detected abort daemon via environment variable"
+    export RUNNING_FROM_ABORT_DAEMON=true
+    return 0
   fi
   
   # Check command line arguments
   for arg in "$@"; do
     if [[ "$arg" == "--from-abort-daemon" ]]; then
-      log_debug "Detected running from abort daemon via command line argument"
-      return 0  # True - explicit command line flag
+      log_debug "Detected abort daemon via command line argument"
+      export RUNNING_FROM_ABORT_DAEMON=true
+      return 0
     fi
   done
   
-  # Check if parent process has "abort" in its command line
-  local parent_cmd=""
+  # Check parent process command line
   if [ -n "$PPID" ]; then
-    parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || echo "")
+    local parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || echo "")
     if [[ "$parent_cmd" == *"com.macjediwizard.eraseinstall.abort"* ]]; then
-      log_debug "Detected running from abort daemon via parent process command: $parent_cmd"
-      return 0  # True - running from abort daemon
+      log_debug "Detected abort daemon via parent process: $parent_cmd"
+      export RUNNING_FROM_ABORT_DAEMON=true
+      return 0
     fi
   fi
   
-  # Not running from abort daemon
   return 1
 }
-
+        
 is_running_from_relaunch_daemon() {
   # Check environment variable first
   if [[ "${RUNNING_FROM_RELAUNCH_DAEMON:-}" == "true" ]]; then
@@ -6092,6 +6113,37 @@ fi
 # Initialize plist for deferral tracking
 init_plist
 
+# Initialize installation state variables early
+log_info "Initializing installation state variables..."
+get_installation_state
+
+# Verify critical variables are set
+if [[ -z "$CURRENT_DEFER_COUNT" ]]; then
+  log_error "Failed to initialize CURRENT_DEFER_COUNT - setting to 0"
+  export CURRENT_DEFER_COUNT=0
+fi
+
+if [[ -z "$FORCE_INSTALL" ]]; then
+  log_error "Failed to initialize FORCE_INSTALL - setting to false"
+  export FORCE_INSTALL=false
+fi
+
+if [[ -z "$CAN_DEFER" ]]; then
+  log_error "Failed to initialize CAN_DEFER - setting to true"
+  export CAN_DEFER=true
+fi
+
+log_debug "State variables initialized: DEFER_COUNT=$CURRENT_DEFER_COUNT, FORCE_INSTALL=$FORCE_INSTALL, CAN_DEFER=$CAN_DEFER"
+
+# TEMPORARY DEBUG BLOCK - REMOVE AFTER TESTING
+log_info "=== STATE VERIFICATION TEST ==="
+log_info "CURRENT_DEFER_COUNT: ${CURRENT_DEFER_COUNT:-UNDEFINED}"
+log_info "CURRENT_ABORT_COUNT: ${CURRENT_ABORT_COUNT:-UNDEFINED}" 
+log_info "FORCE_INSTALL: ${FORCE_INSTALL:-UNDEFINED}"
+log_info "CAN_DEFER: ${CAN_DEFER:-UNDEFINED}"
+log_info "CAN_ABORT: ${CAN_ABORT:-UNDEFINED}"
+log_info "=== END STATE VERIFICATION ==="
+
 # Check if system is already running the target OS version
 log_info "Performing early OS version check..."
 if [[ "${SKIP_OS_VERSION_CHECK}" == "true" ]]; then
@@ -6123,7 +6175,7 @@ elif check_os_already_updated; then
 fi
 
 # Get current deferral state
-get_deferral_state
+get_installation_state
 
 # Set options based on deferral state
 set_options
