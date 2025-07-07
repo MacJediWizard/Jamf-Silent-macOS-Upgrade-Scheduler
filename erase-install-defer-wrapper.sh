@@ -31,6 +31,12 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.6.4 - Fixed critical second deferral issue
+#         - Resolved state management inconsistency in deferral logic
+#         - Fixed state variables not being refreshed after defer count increments  
+#         - Improved reliability of deferral workflow for both test and production modes
+#         - Simplified get_deferral_state() function and enhanced state consistency
+#         - Replaced direct plist manipulation with proper state management functions
 # v1.6.3 - Improved reliability of LaunchDaemon creation and loading
 #         - Added script validation for watchdog and abort daemons
 #         - Enhanced parameter verification to ensure critical settings are maintained
@@ -122,7 +128,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.6.3"              # Current version of this script
+SCRIPT_VERSION="1.6.4"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -1813,10 +1819,6 @@ get_deferral_state() {
   # Backward compatibility function - calls the new function
   log_debug "get_deferral_state called - redirecting to get_installation_state"
   get_installation_state
-  
-  # Export old-style variables for backward compatibility
-  export deferCount="$CURRENT_DEFER_COUNT"
-  export firstDate="$CURRENT_FIRST_DATE"
 }
         
 # Increment defer count with validation
@@ -1837,8 +1839,12 @@ increment_defer_count() {
     return 1
   fi
   
-  # Update exported variable
+  # Update exported variable and refresh all state
   export CURRENT_DEFER_COUNT="$new_count"
+  
+  # Refresh all state variables to ensure consistency
+  get_installation_state
+  
   log_info "Successfully incremented defer count to $new_count"
   return 0
 }
@@ -4300,7 +4306,7 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
 <string>/var/log/erase-install-wrapper.log</string>
 <key>StandardErrorPath</key>
 <string>/var/log/erase-install-wrapper.log</string>
-      
+<key>RunAtLoad</key>      
 <false/>
 <key>LaunchOnlyOnce</key>
 <true/>
@@ -5338,33 +5344,17 @@ show_prompt() {
         # Show countdown for installations after deferral expiry
         show_preinstall "true"
       else
-        # Track old deferCount for logging
-        local oldCount=$CURRENT_DEFER_COUNT
-        newCount=$((oldCount + 1))
-        
-        log_info "Incrementing deferral count from ${oldCount} to ${newCount}"
-        defaults write "${PLIST}" deferCount -int "$newCount"
-        
-        # Verify the count was incremented and saved successfully
-        local verify_count
-        verify_count=$(defaults read "${PLIST}" deferCount 2>/dev/null || echo "ERROR")
-        if [[ "$verify_count" != "$newCount" ]]; then
-          log_error "Failed to save new deferral count (got: ${verify_count}, expected: ${newCount}) - check permissions on ${PLIST}"
-          # Try again with sudo if we have it
-          if command -v sudo &>/dev/null && [ "$EUID" -ne 0 ]; then
-            log_info "Attempting to use sudo to write deferral count"
-            sudo defaults write "${PLIST}" deferCount -int "$newCount"
-          fi
-          # Verify again
-          verify_count=$(defaults read "${PLIST}" deferCount 2>/dev/null || echo "ERROR")
-          if [[ "$verify_count" != "$newCount" ]]; then
-            log_error "Still failed to save deferral count after sudo attempt"
-          else
-            log_info "Successfully saved deferral count using sudo"
-          fi
-        else
-          log_info "Successfully saved new deferral count: ${newCount}"
+        # Use the state management function instead of direct plist manipulation
+        if ! increment_defer_count; then
+          log_error "Failed to increment defer count"
+          return 1
         fi
+        
+        # Refresh state variables after incrementing
+        get_installation_state
+        
+        # Use the updated state variable
+        local newCount=$CURRENT_DEFER_COUNT
         
         if [[ "$TEST_MODE" == "true" ]]; then
           log_info "TEST MODE: Deferred for 5 minutes (${newCount}/${MAX_DEFERS})"

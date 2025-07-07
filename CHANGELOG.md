@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.6.4 - 2025-07-07
+### Fixed
+- Fixed critical issue with second deferral not working properly
+- Resolved state management inconsistency in deferral logic by using increment_defer_count() function instead of direct plist manipulation
+- Fixed state variables not being refreshed after defer count increments
+- Ensured proper synchronization of CURRENT_DEFER_COUNT and FORCE_INSTALL variables
+
+### Improved
+- Simplified get_deferral_state() function to remove duplicate variable exports
+- Enhanced state consistency by adding automatic state refresh after defer count changes
+- Improved reliability of deferral workflow for both test mode and production deferrals
+
+### Technical Changes
+- Replaced direct `defaults write` calls in deferral logic with proper state management functions
+- Added get_installation_state() call after increment_defer_count() to refresh exported variables
+- Streamlined backward compatibility function for cleaner code maintenance
+
+---
 
 ## 1.6.3 - 2025-05-19
 ### Added
