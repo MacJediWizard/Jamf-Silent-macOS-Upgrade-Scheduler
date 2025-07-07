@@ -31,13 +31,16 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
-# v1.6.5 - Fixed premature deferral reset issue
-#         - CRITICAL: Deferrals now only reset after successful installation completion
-#         - Removed premature reset_deferrals() calls from "Install Now" and "Schedule Today" selections
-#         - Added proper reset_all_counters() call only after run_erase_install() completes successfully
-#         - Fixed issue where deferral count would reset to 0/3 before installation ran
-#         - Ensures deferral persistence across scheduling and selection actions
-#         - Deferrals are now properly preserved until actual macOS installation completes
+# v1.6.5 - Fixed deferral state persistence and enhanced abort functionality
+#         - FIXED: Removed premature reset calls that were clearing deferral state too early
+#         - FIXED: Added proper reset only after successful installation completion
+#         - FIXED: Enhanced abort button detection with comprehensive logging
+#         - FIXED: Improved abort daemon creation and loading verification
+#         - FIXED: Added detailed abort signal file creation and validation
+#         - FIXED: Enhanced watchdog abort processing with step-by-step logging
+#         - VERIFIED: Deferral progression now works correctly (0/3 → 1/3 → 2/3 → 3/3)
+#         - VERIFIED: Force install correctly shows only "Install Now" and "Schedule Today" after max deferrals
+#         - VERIFIED: Emergency abort now properly reschedules installations
 # v1.6.4 - Fixed critical second deferral issue
 #         - Resolved state management inconsistency in deferral logic
 #         - Fixed state variables not being refreshed after defer count increments  

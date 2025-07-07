@@ -3,30 +3,36 @@
 All notable changes to this project will be documented in this file.
 
 
-## [1.6.5] - 2025-01-20
-### Fixed - CRITICAL DEFERRAL ISSUE
-- **BREAKING BUG FIX**: Deferrals were resetting before installation completed, not after
-- Removed premature `reset_deferrals()` calls from "Install Now" and "Schedule Today" user selections
-- Added proper `reset_all_counters()` call only after `run_erase_install()` completes successfully
-- Fixed issue where deferral count would show 0/3 instead of preserving actual count (1/3, 2/3, 3/3)
-- Ensures deferral state persistence across all user interactions until installation actually runs
-- Prevents users from bypassing deferral limits by selecting "Schedule Today" repeatedly
+## [1.6.5] - 2025-07-07
+### Fixed - Deferral State Management
+- **CRITICAL FIX**: Removed premature `reset_deferrals()` calls from "Install Now" and "Schedule Today" cases
+- **CRITICAL FIX**: Removed premature `reset_all_counters()` call from force install case  
+- **ENHANCED**: Added proper `reset_all_counters()` only after successful `run_erase_install()` completion
+- **VERIFIED**: Deferral progression now works correctly: 0/3 → 1/3 → 2/3 → 3/3
+- **VERIFIED**: Force install dialog correctly shows only "Install Now" and "Schedule Today" (no defer option) after max deferrals reached
+
+### Fixed - Emergency Abort Functionality  
+- **CRITICAL FIX**: Enhanced abort button detection in helper script with comprehensive logging
+- **CRITICAL FIX**: Improved abort signal file creation and verification process
+- **CRITICAL FIX**: Enhanced watchdog abort processing with detailed step-by-step logging
+- **CRITICAL FIX**: Improved abort daemon creation and loading verification with retry logic
+- **ENHANCED**: Added detailed abort count increment verification and error handling
+- **ENHANCED**: Added comprehensive time calculation logging for abort reschedule
+- **ENHANCED**: Added daemon loading verification with multiple fallback methods
+- **VERIFIED**: Emergency abort now properly creates and loads abort daemons for rescheduling
+
+### Testing Improvements
+- **ENHANCED**: Added extensive debug logging throughout abort processing workflow
+- **ENHANCED**: Added abort signal file creation verification with sudo fallback
+- **ENHANCED**: Added daemon plist validation and loading status verification
+- **ENHANCED**: Added user notification improvements for abort confirmation
 
 ### Technical Details
-- **Root Cause**: Script was resetting counters when user made selection, not when installation completed
-- **Impact**: Users could infinite defer by scheduling installations that never reset properly
-- **Solution**: Deferrals now only reset after successful `run_erase_install()` execution
-- **Affected Functions**: `show_prompt()`, `run_erase_install()`, deferral state management
-- **Backward Compatibility**: Existing plist files will work correctly with new logic
-
-### Testing Verified
-- ✅ First deferral: 0/3 → 1/3 (preserved)
-- ✅ Second deferral: 1/3 → 2/3 (preserved) 
-- ✅ Third deferral: 2/3 → 3/3 (preserved)
-- ✅ Force install: Only "Install Now" and "Schedule Today" options (no defer)
-- ✅ Scheduled installations preserve deferral count until completion
-- ✅ "Install Now" preserves deferral count until installation completes
-- ✅ Counters only reset after successful installation run
+- Fixed helper script abort detection to properly create `/var/tmp/erase-install-abort-{run_id}` files
+- Enhanced watchdog script abort processing with detailed logging at each step
+- Improved abort daemon loading with `launchctl load`, `bootstrap`, and `kickstart` fallback methods
+- Added comprehensive verification of abort daemon presence in launchctl after loading
+- Enhanced abort count increment verification with plist read-back confirmation
 
 ---
 
