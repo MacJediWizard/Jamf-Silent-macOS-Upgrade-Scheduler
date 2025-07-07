@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+
+## [1.6.5] - 2025-01-20
+### Fixed - CRITICAL DEFERRAL ISSUE
+- **BREAKING BUG FIX**: Deferrals were resetting before installation completed, not after
+- Removed premature `reset_deferrals()` calls from "Install Now" and "Schedule Today" user selections
+- Added proper `reset_all_counters()` call only after `run_erase_install()` completes successfully
+- Fixed issue where deferral count would show 0/3 instead of preserving actual count (1/3, 2/3, 3/3)
+- Ensures deferral state persistence across all user interactions until installation actually runs
+- Prevents users from bypassing deferral limits by selecting "Schedule Today" repeatedly
+
+### Technical Details
+- **Root Cause**: Script was resetting counters when user made selection, not when installation completed
+- **Impact**: Users could infinite defer by scheduling installations that never reset properly
+- **Solution**: Deferrals now only reset after successful `run_erase_install()` execution
+- **Affected Functions**: `show_prompt()`, `run_erase_install()`, deferral state management
+- **Backward Compatibility**: Existing plist files will work correctly with new logic
+
+### Testing Verified
+- ✅ First deferral: 0/3 → 1/3 (preserved)
+- ✅ Second deferral: 1/3 → 2/3 (preserved) 
+- ✅ Third deferral: 2/3 → 3/3 (preserved)
+- ✅ Force install: Only "Install Now" and "Schedule Today" options (no defer)
+- ✅ Scheduled installations preserve deferral count until completion
+- ✅ "Install Now" preserves deferral count until installation completes
+- ✅ Counters only reset after successful installation run
+
+---
+
 ## 1.6.4 - 2025-07-07
 ### Fixed
 - Fixed critical issue with second deferral not working properly

@@ -31,6 +31,13 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.6.5 - Fixed premature deferral reset issue
+#         - CRITICAL: Deferrals now only reset after successful installation completion
+#         - Removed premature reset_deferrals() calls from "Install Now" and "Schedule Today" selections
+#         - Added proper reset_all_counters() call only after run_erase_install() completes successfully
+#         - Fixed issue where deferral count would reset to 0/3 before installation ran
+#         - Ensures deferral persistence across scheduling and selection actions
+#         - Deferrals are now properly preserved until actual macOS installation completes
 # v1.6.4 - Fixed critical second deferral issue
 #         - Resolved state management inconsistency in deferral logic
 #         - Fixed state variables not being refreshed after defer count increments  
@@ -128,7 +135,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.6.4"              # Current version of this script
+SCRIPT_VERSION="1.6.5"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -2502,30 +2509,34 @@ $([[ "$USE_ABORT_BUTTON" == "true" ]] && echo "  --button2text '${ABORT_BUTTON_T
 DIALOG_RESULT=\$?
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog completed with status: \$DIALOG_RESULT" >> "\$LOG_FILE"
 
-# Check if abort was clicked (dialog result = 2)
+# ENHANCED ABORT DETECTION - Check if abort was clicked (dialog result = 2)
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Checking dialog result: \$DIALOG_RESULT" >> "\$LOG_FILE"
 if [ \$DIALOG_RESULT -eq 2 ]; then
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Abort button was clicked" >> "\$LOG_FILE"
-# Create abort file for watchdog to detect
-touch "/var/tmp/erase-install-abort-${run_id}"
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created abort signal file at: /var/tmp/erase-install-abort-${run_id}" >> "\$LOG_FILE"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ ABORT BUTTON CLICKED - Starting abort processing" >> "\$LOG_FILE"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Run ID: ${run_id}" >> "\$LOG_FILE"
 
-# Verify the abort file was created
+# Create abort file for watchdog to detect with verification
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Creating abort signal file..." >> "\$LOG_FILE"
+touch "/var/tmp/erase-install-abort-${run_id}"
+
+# Verify abort file was created
 if [ -f "/var/tmp/erase-install-abort-${run_id}" ]; then
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Abort signal file verified" >> "\$LOG_FILE"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ Abort signal file created successfully" >> "\$LOG_FILE"
+ls -la "/var/tmp/erase-install-abort-${run_id}" >> "\$LOG_FILE" 2>&1
 else
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Failed to create abort signal file" >> "\$LOG_FILE"
-# Try again with sudo
-sudo touch "/var/tmp/erase-install-abort-${run_id}" 2>/dev/null
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ❌ ERROR: Failed to create abort signal file" >> "\$LOG_FILE"
+sudo touch "/var/tmp/erase-install-abort-${run_id}" 2>&1 >> "\$LOG_FILE"
 fi
 
 # Show abort countdown dialog
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Displaying abort confirmation dialog" >> "\$LOG_FILE"
 "${DIALOG_BIN}" --title "Aborting Installation" \\
 --message "Emergency abort activated. Installation will be postponed for ${ABORT_DEFER_MINUTES} minutes." \\
 --icon ${ABORT_ICON} \\
 --button1text "OK" \\
 --timer ${ABORT_COUNTDOWN} \\
 --progress ${ABORT_COUNTDOWN} \\
---progresstext "Aborting in \${ABORT_COUNTDOWN} seconds..." \\
+--progresstext "Aborting in ${ABORT_COUNTDOWN} seconds..." \\
 --position "${DIALOG_POSITION}" \\
 --moveable \\
 --ontop \\
@@ -2533,8 +2544,10 @@ fi
 --width ${ABORT_WIDTH} 
 
 # Signal success to the user
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Sending user notification" >> "\$LOG_FILE"
 osascript -e "display notification \"Installation aborted and will be rescheduled\" with title \"macOS Upgrade\"" 2>/dev/null || true
 
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ ABORT PROCESSING COMPLETE - Exiting helper script" >> "\$LOG_FILE"
 # Exit without creating trigger file
 exit 0
 fi
@@ -3849,31 +3862,42 @@ sleep $SLEEP_INTERVAL
 COUNTER=$((COUNTER + SLEEP_INTERVAL))
 done
 
-# Check for abort file
+# Enhanced abort file detection
 if [ -f "$ABORT_FILE" ]; then
-  log_message "Abort request detected, scheduling short-term deferral"
-  rm -f "$ABORT_FILE"
+  log_message "🚨 ABORT DETECTED: Processing emergency abort request"
+  log_message "Abort file: $ABORT_FILE"
+  log_message "Run ID: $RUN_ID"
   
-  # NEW: Check for test execution flag
+  # Remove abort file immediately
+  rm -f "$ABORT_FILE"
+  log_message "Removed abort signal file"
+  
+  # Check for test execution flag
   if [ -f "/var/tmp/erase-install-immediate-test-${RUN_ID}" ]; then
-    log_message "Detected immediate execution test flag - creating success marker"
+    log_message "Test mode detected - exiting"
     rm -f "/var/tmp/erase-install-immediate-test-${RUN_ID}"
     touch "/var/tmp/erase-install-abort-test-success-${RUN_ID}"
-    # Exit early during test mode
     exit 0
   fi
   
-  # Increment abort count
+  # Increment abort count with verification
+  log_message "📊 INCREMENTING ABORT COUNT"
   abort_count=$(defaults read "$PLIST" abortCount 2>/dev/null || echo 0)
+  log_message "Current abort count: $abort_count"
   abort_count=$((abort_count + 1))
   defaults write "$PLIST" abortCount -int "$abort_count"
-  log_message "Abort count incremented to $abort_count/$MAX_ABORTS"
   
-  # Calculate new defer time (ABORT_DEFER_MINUTES from now)
+  # Verify increment
+  verify_count=$(defaults read "$PLIST" abortCount 2>/dev/null || echo "ERROR")
+  log_message "New abort count: $verify_count/$MAX_ABORTS"
+  
+  # Calculate defer time
+  log_message "⏰ CALCULATING RESCHEDULE TIME"
   current_hour=$(date +%H)
   current_min=$(date +%M)
   current_hour=$((10#$current_hour))
   current_min=$((10#$current_min))
+  log_message "Current time: $current_hour:$current_min"
   
   # Add defer minutes
   current_min=$((current_min + ABORT_DEFER_MINUTES))
@@ -3887,11 +3911,9 @@ if [ -f "$ABORT_FILE" ]; then
   # Handle hour rollover
   if [ $current_hour -ge 24 ]; then
     current_hour=$((current_hour - 24))
-    # Need tomorrow's date
     defer_day=$(date -v+1d +%d)
     defer_month=$(date -v+1d +%m)
   else
-    # Use today's date
     defer_day=$(date +%d)
     defer_month=$(date +%m)
   fi
@@ -3900,43 +3922,40 @@ if [ -f "$ABORT_FILE" ]; then
   defer_hour=$(printf "%02d" $current_hour)
   defer_min=$(printf "%02d" $current_min)
   
-  log_message "Scheduling aborted installation to resume at $defer_hour:$defer_min"
+  log_message "🎯 SCHEDULING FOR: $defer_hour:$defer_min"
   
-  # Call the function to create the daemon
+  # Create abort daemon
+  log_message "🛠️ CREATING ABORT DAEMON"
   if create_abort_daemon; then
-    # Get the daemon path and label for loading
     abort_daemon_label="com.macjediwizard.eraseinstall.abort.${RUN_ID}"
     abort_daemon_path="/Library/LaunchDaemons/${abort_daemon_label}.plist"
     
-    # Load the daemon with retry logic and sudo
-    log_message "Loading abort LaunchDaemon $abort_daemon_label"
+    log_message "Loading abort daemon: $abort_daemon_label"
+    
+    # Load daemon with verification
     if sudo launchctl load "$abort_daemon_path" 2>/dev/null; then
-      log_message "Successfully loaded abort LaunchDaemon"
+      log_message "✅ Standard load succeeded"
     else
-      log_message "WARNING: Failed to load abort LaunchDaemon with standard method"
-      log_message "Attempting alternative loading methods"
+      log_message "⚠️ Standard load failed, trying alternatives"
       sudo launchctl bootstrap system "$abort_daemon_path" 2>/dev/null || 
       sudo launchctl kickstart system/"$abort_daemon_label" 2>/dev/null
     fi
     
-    # Verify schedule anyway
-    verify_abort_schedule "$abort_daemon_label"
-    
-    # Final confirmation of functionality
+    # Verify daemon is loaded
+    sleep 2
     if launchctl list | grep -q "$abort_daemon_label"; then
-      log_message "✅ CONFIRMED: Abort LaunchDaemon is active and will run at $defer_hour:$defer_min"
-      
-      # Notify user
+      log_message "✅ SUCCESS: Abort daemon loaded for $defer_hour:$defer_min"
       osascript -e "display notification \"Installation rescheduled for $defer_hour:$defer_min\" with title \"macOS Upgrade Aborted\"" 2>/dev/null || true
     else
-      log_message "⚠️ WARNING: Abort LaunchDaemon activation could not be confirmed"
-      log_message "This may still work, but please check system logs if installation doesn't resume"
+      log_message "❌ CRITICAL: Abort daemon not found in launchctl"
+      launchctl list | grep "eraseinstall" | head -5 | log_message
     fi
+    
   else
-    log_message "ERROR: Unable to create abort daemon, cleanup will proceed without rescheduling"
+    log_message "❌ CRITICAL: create_abort_daemon function failed"
   fi
   
-  # Clean up and exit
+  log_message "🏁 ABORT PROCESSING COMPLETE"
   cleanup_watchdog
   exit 0
 fi
@@ -4812,6 +4831,10 @@ run_erase_install() {
     remove_existing_launchdaemon
   fi
   
+  # IMPORTANT: Only reset deferrals after successful installation
+  log_info "Installation completed successfully. Resetting deferral and abort counts."
+  reset_all_counters
+  
   return 0
 }
 
@@ -5211,7 +5234,6 @@ show_prompt() {
     "${DIALOG_INSTALL_NOW_TEXT}")
       # Ensure any existing LaunchDaemons are removed for "Install Now"
       remove_existing_launchdaemon
-      reset_deferrals
       
       # Check if OS is already at the target version
       log_info "Checking if OS is already up-to-date before proceeding with immediate installation..."
@@ -5316,13 +5338,12 @@ show_prompt() {
         fi
       fi
       
-      reset_deferrals
     ;;
     # Handle both normal and test mode defer options
     "${DIALOG_DEFER_TEXT}" | "${DIALOG_DEFER_TEXT_TEST_MODE}")
       if [[ "${FORCE_INSTALL}" = true ]]; then
         log_warn "Maximum deferrals (${MAX_DEFERS}) reached or time limit exceeded (used: ${CURRENT_DEFER_COUNT}/${MAX_DEFERS})."
-        reset_all_counters
+        log_info "Force install triggered - deferrals will be reset only after installation completes."
         
         # Check if OS is already at the target version
         log_info "Checking if OS is already up-to-date before forced installation after max deferrals..."
