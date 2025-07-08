@@ -2713,7 +2713,10 @@ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog exists: \$([ -x "${DIALOG_BIN}" ] &
 touch "/var/tmp/erase-install-ui-starting-${run_id}"
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created UI start signal file" >> "\$LOG_FILE"
 
-# Display dialog with countdown - enhanced for visibility
+# Create dialog output file for JSON parsing
+DIALOG_OUTPUT_FILE="/tmp/dialog-output-${run_id}.json"
+
+# Display dialog with countdown - enhanced for visibility and JSON output
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting dialog with elevated priority" >> "\$LOG_FILE"
 "${DIALOG_BIN}" --title "${display_title}" \\
 --message "${SCHEDULED_MESSAGE}" \\
@@ -2729,14 +2732,28 @@ $([[ "$USE_ABORT_BUTTON" == "true" ]] && echo "  --button2text '${ABORT_BUTTON_T
 --progress ${SCHEDULED_COUNTDOWN} \\
 --progresstext "${SCHEDULED_PROGRESS_TEXT_MESSAGE}" \\
 --timer ${SCHEDULED_COUNTDOWN} \\
---commandfile "/var/tmp/dialog-cmd-${run_id}"
+--jsonoutput > "\$DIALOG_OUTPUT_FILE"
 
 DIALOG_RESULT=\$?
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog completed with status: \$DIALOG_RESULT" >> "\$LOG_FILE"
 
-# ENHANCED ABORT DETECTION - Check if abort was clicked (dialog result = 2)
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Checking dialog result: \$DIALOG_RESULT" >> "\$LOG_FILE"
-if [ \$DIALOG_RESULT -eq 2 ]; then
+# ENHANCED ABORT DETECTION - Parse JSON output for button click
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Parsing dialog JSON output for abort detection" >> "\$LOG_FILE"
+
+# Check if dialog output file exists and parse it
+if [ -f "\$DIALOG_OUTPUT_FILE" ]; then
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog output file found, parsing JSON" >> "\$LOG_FILE"
+  
+  # Extract button number from JSON output (same method as show_preinstall)
+  BUTTON_CLICKED=\$(cat "\$DIALOG_OUTPUT_FILE" | grep "button" | cut -d':' -f2 | tr -d '" ,')
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Button clicked: '\$BUTTON_CLICKED'" >> "\$LOG_FILE"
+  
+  # Log the full JSON for debugging
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Full dialog JSON output:" >> "\$LOG_FILE"
+  cat "\$DIALOG_OUTPUT_FILE" >> "\$LOG_FILE" 2>&1
+  
+  # Check if abort button (button 2) was clicked
+  if [[ "\$BUTTON_CLICKED" == "2" ]]; then
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ ABORT BUTTON CLICKED - Starting abort processing" >> "\$LOG_FILE"
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Run ID: ${run_id}" >> "\$LOG_FILE"
 
@@ -2776,6 +2793,12 @@ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ ABORT PROCESSING COMPLETE - Exiting he
 # Exit without creating trigger file
 exit 0
 fi
+else
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ Dialog output file not found - cannot parse abort status" >> "\$LOG_FILE"
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Expected file: \$DIALOG_OUTPUT_FILE" >> "\$LOG_FILE"
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog exit code was: \$DIALOG_RESULT" >> "\$LOG_FILE"
+    # Continue with normal flow since we can't detect abort
+  fi
 
 # Wait for watchdog to be ready before creating trigger file
 WATCHDOG_READY_FLAG="/var/tmp/erase-install-watchdog-ready-${run_id}"
@@ -2833,6 +2856,9 @@ rm -f "$agent_path" 2>/dev/null && echo "Removed agent file" >> "\$LOG_FILE"
 # Create cleanup signal
 touch "/var/tmp/erase-install-ui-completed-${run_id}"
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created UI completion file" >> "\$LOG_FILE"
+
+# Clean up dialog output file
+rm -f "\$DIALOG_OUTPUT_FILE" 2>/dev/null
 
 # Delete self with delay to ensure complete execution
 (sleep 5 && rm -f "$0" && echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Helper script self-cleaned" >> "\$LOG_FILE") &
