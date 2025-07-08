@@ -470,19 +470,27 @@ show_auth_notice() {
   
   log_info "Displaying pre-authentication notice"
   
-  # Get console user for proper UI handling
+  # Enhanced console user detection for LaunchDaemon context
   local console_user=""
+  local console_uid=""
+  
+  # Multiple detection methods for reliability
   console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
   [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
   [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
-  local console_uid
-  console_uid=$(id -u "$console_user" 2>/dev/null || echo "0")
+  [ -z "$console_user" ] && console_user=$(ls -l /dev/console | awk '{print $3}')
   
-  # Set UI environment for the console user
-  export DISPLAY=:0
-  if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
-    launchctl asuser "$console_uid" sudo -u "$console_user" defaults write org.swift.SwiftDialog FrontmostApplication -bool true
+  # Get UID with validation
+  if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
+    console_uid=$(id -u "$console_user" 2>/dev/null || echo "")
+    if [ -z "$console_uid" ] || [ "$console_uid" = "0" ]; then
+      log_warn "Failed to get valid UID for user $console_user"
+      console_user=""
+      console_uid=""
+    fi
   fi
+  
+  log_info "Pre-auth notice: console_user='$console_user', console_uid='$console_uid'"
   
   # For test mode, use a modified title
   local display_title="$AUTH_NOTICE_TITLE"
@@ -494,18 +502,156 @@ show_auth_notice() {
     timeout_args="--timer $AUTH_NOTICE_TIMEOUT"
   fi
   
-  # Display the dialog
-  "$DIALOG_BIN" --title "$display_title" \
-  --message "$AUTH_NOTICE_MESSAGE" \
-  --button1text "$AUTH_NOTICE_BUTTON" \
-  --icon "$AUTH_NOTICE_ICON" \
-  --height $AUTH_NOTICE_HEIGHT \
-  --width $AUTH_NOTICE_WIDTH \
-  --moveable \
-  --position "$DIALOG_POSITION" \
-  $timeout_args
+  # Run dialog as user to avoid TCC issues
+  local result=1
   
-  local result=$?
+  if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
+    log_info "Running pre-auth dialog as user $console_user to avoid TCC permissions issues"
+    
+    # Generate a unique ID for this dialog execution
+    local dialog_id="$(date +%Y%m%d%H%M%S)-$$"
+    local temp_script="/tmp/preauth-dialog-${dialog_id}.sh"
+    local result_file="/tmp/dialog-result-${dialog_id}.txt"
+    
+    cat > "$temp_script" << 'EOFSCRIPT'
+#!/bin/bash
+export DISPLAY=:0
+export HOME="/Users/CONSOLE_USER_PLACEHOLDER"
+cd "/Users/CONSOLE_USER_PLACEHOLDER"
+
+# Set up proper environment for SwiftDialog
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# Verify SwiftDialog exists
+if [ ! -x "DIALOG_BIN_PLACEHOLDER" ]; then
+  echo "DIALOG_EXIT_CODE:1" > "RESULT_FILE_PLACEHOLDER"
+  exit 1
+fi
+
+# Run SwiftDialog
+"DIALOG_BIN_PLACEHOLDER" \
+  --title "DISPLAY_TITLE_PLACEHOLDER" \
+  --message "AUTH_NOTICE_MESSAGE_PLACEHOLDER" \
+  --button1text "AUTH_NOTICE_BUTTON_PLACEHOLDER" \
+  --icon "AUTH_NOTICE_ICON_PLACEHOLDER" \
+  --height AUTH_NOTICE_HEIGHT_PLACEHOLDER \
+  --width AUTH_NOTICE_WIDTH_PLACEHOLDER \
+  --moveable \
+  --position "DIALOG_POSITION_PLACEHOLDER" \
+  TIMEOUT_ARGS_PLACEHOLDER
+
+DIALOG_RESULT=$?
+echo "DIALOG_EXIT_CODE:$DIALOG_RESULT" > "RESULT_FILE_PLACEHOLDER"
+exit 0
+EOFSCRIPT
+    
+    # Replace placeholders with actual values
+    sed -i '' "s|CONSOLE_USER_PLACEHOLDER|$console_user|g" "$temp_script"
+    sed -i '' "s|DIALOG_BIN_PLACEHOLDER|$DIALOG_BIN|g" "$temp_script"
+    sed -i '' "s|DISPLAY_TITLE_PLACEHOLDER|$display_title|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_MESSAGE_PLACEHOLDER|$AUTH_NOTICE_MESSAGE|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_BUTTON_PLACEHOLDER|$AUTH_NOTICE_BUTTON|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_ICON_PLACEHOLDER|$AUTH_NOTICE_ICON|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_HEIGHT_PLACEHOLDER|$AUTH_NOTICE_HEIGHT|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_WIDTH_PLACEHOLDER|$AUTH_NOTICE_WIDTH|g" "$temp_script"
+    sed -i '' "s|DIALOG_POSITION_PLACEHOLDER|$DIALOG_POSITION|g" "$temp_script"
+    sed -i '' "s|TIMEOUT_ARGS_PLACEHOLDER|$timeout_args|g" "$temp_script"
+    sed -i '' "s|RESULT_FILE_PLACEHOLDER|$result_file|g" "$temp_script"
+    
+    # After the sed replacements, add:
+    log_debug "Generated temp script content:"
+    if [[ "${DEBUG_MODE}" == "true" ]]; then
+      cat "$temp_script" | while IFS= read -r line; do
+        log_debug "  $line"
+      done
+    fi
+    
+    chmod +x "$temp_script"
+    chown "$console_user" "$temp_script"
+    
+    # Execute as the user and capture result
+    log_debug "Executing temp script: $temp_script"
+    log_debug "Expected result file: $result_file"
+    
+    # Execute the script using a more reliable method
+    log_debug "Executing temp script as user $console_user"
+    
+    # Method 1: Direct sudo execution (most reliable)
+    sudo -u "$console_user" bash "$temp_script" > /tmp/dialog-exec-${dialog_id}.log 2>&1 &
+    local script_pid=$!
+    
+    log_debug "Started script process with PID: $script_pid"
+    
+    # Wait for the script to complete or timeout
+    local timeout=180
+    local counter=0
+    local script_completed=false
+    
+    log_debug "Waiting for temp script completion (PID: $script_pid)..."
+    
+    # Wait for either the result file to appear or the process to complete
+    while [ $counter -lt $timeout ]; do
+      # Check if result file exists
+      if [ -f "$result_file" ]; then
+        log_debug "Result file found after ${counter} seconds"
+        script_completed=true
+        break
+      fi
+      
+      # Check if the process is still running
+      if ! kill -0 $script_pid 2>/dev/null; then
+        log_debug "Script process completed after ${counter} seconds"
+        # Give it a moment for the result file to be written
+        sleep 2
+        break
+      fi
+      
+      sleep 1
+      counter=$((counter + 1))
+      
+      # Log progress every 10 seconds
+      if [ $((counter % 10)) -eq 0 ]; then
+        log_debug "Still waiting for script completion... (${counter}/${timeout} seconds)"
+      fi
+    done
+    
+    # Read the result
+    if [ -f "$result_file" ]; then
+      local dialog_exit_code=""
+      dialog_exit_code=$(grep "DIALOG_EXIT_CODE:" "$result_file" | cut -d: -f2 | tr -d ' ')
+      
+      if [ -n "$dialog_exit_code" ]; then
+        result="$dialog_exit_code"
+        log_info "SwiftDialog completed with exit code: $result"
+      else
+        log_warn "Result file exists but couldn't parse exit code, assuming success"
+        result=0
+      fi
+      
+      # Clean up result file
+      rm -f "$result_file"
+    else
+      log_warn "No result file found after ${counter} seconds, checking script status"
+      
+      # Check if the script process is still running
+      if kill -0 $script_pid 2>/dev/null; then
+        log_warn "Script still running after timeout, killing it"
+        kill -TERM $script_pid 2>/dev/null
+        sleep 2
+        kill -KILL $script_pid 2>/dev/null
+      fi
+      
+      log_warn "Assuming dialog completed successfully"
+      result=0
+    fi
+    
+    # Cleanup
+    rm -f "$temp_script"
+  else
+    log_error "No valid console user found for pre-auth dialog"
+    result=1
+  fi
+  
   log_debug "Pre-authentication notice dialog completed with status: $result"
   
   # Give user a moment to prepare
@@ -1885,6 +2031,35 @@ increment_abort_count() {
   log_info "Successfully incremented abort count to $new_count"
   return 0
 }
+        
+# Save active abort daemon to plist for preservation
+save_active_abort_daemon() {
+  local daemon_label="$1"
+  
+  if [[ -z "$daemon_label" ]]; then
+    log_warn "No daemon label provided to save_active_abort_daemon"
+    return 1
+  fi
+  
+  # Verify the daemon exists
+  if [ ! -f "/Library/LaunchDaemons/${daemon_label}.plist" ]; then
+    log_warn "Cannot save non-existent abort daemon: ${daemon_label}"
+    return 1
+  fi
+  
+  # Save the active abort daemon in the plist
+  log_info "Saving active abort daemon: $daemon_label"
+  defaults write "${PLIST}" activeAbortDaemon -string "${daemon_label}"
+  
+  # Save the current run ID separately to help with tracking
+  local run_id="${daemon_label##*.}"
+  if [ -n "$run_id" ]; then
+    log_info "Saving abort run ID: $run_id"
+    defaults write "${PLIST}" abortRunID -string "$run_id"
+  fi
+  
+  return 0
+}
 
 # Reset all counters
 reset_all_counters() {
@@ -1952,6 +2127,30 @@ remove_existing_launchdaemon() {
     log_info "Found active relaunch daemon in plist: $active_relaunch_daemon"
   fi
   
+  # Check if we have an active abort daemon to preserve
+  local active_abort_daemon=""
+  if [[ "$RUNNING_FROM_ABORT_DAEMON" == "true" ]]; then
+    # Try to identify our parent abort daemon
+    if [ -n "$PPID" ]; then
+      local parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || echo "")
+      if [[ "$parent_cmd" == *"com.macjediwizard.eraseinstall.abort"* ]]; then
+        # Extract the abort daemon label from parent command
+        active_abort_daemon=$(echo "$parent_cmd" | grep -o "com\.macjediwizard\.eraseinstall\.abort\.[0-9]\{14\}" | head -1)
+        if [[ -n "$active_abort_daemon" ]]; then
+          log_info "Found active abort daemon from parent process: $active_abort_daemon"
+        fi
+      fi
+    fi
+    
+    # Fallback: check plist for stored abort daemon
+    if [[ -z "$active_abort_daemon" ]]; then
+      active_abort_daemon=$(defaults read "${PLIST}" activeAbortDaemon 2>/dev/null || echo "")
+      if [[ -n "$active_abort_daemon" ]]; then
+        log_info "Found active abort daemon from plist: $active_abort_daemon"
+      fi
+    fi
+  fi
+  
   # First forcefully remove lingering entries from launchctl
   for label in $(launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
     if [ -n "$label" ]; then
@@ -1969,8 +2168,18 @@ remove_existing_launchdaemon() {
       
       # Skip abort daemons if we're preserving them
       if [[ "$preserve_abort_daemon" == "true" && "${label}" == *".abort."* ]]; then
-        log_info "Preserving abort daemon: ${label}"
-        continue
+        # Only preserve the specific active abort daemon, not all abort daemons
+        if [[ -n "$active_abort_daemon" && "$label" == "$active_abort_daemon" ]]; then
+          log_info "Preserving active abort daemon: ${label}"
+          continue
+        elif [[ -z "$active_abort_daemon" ]]; then
+          # If we can't identify the specific one, preserve all abort daemons as safety measure
+          log_info "Preserving abort daemon (no specific active daemon identified): ${label}"
+          continue
+        else
+          log_info "Removing non-active abort daemon: ${label}"
+          # Don't continue - let it be removed
+        fi
       fi
       
       log_info "Force removing lingering daemon: $label"
@@ -2035,8 +2244,18 @@ remove_existing_launchdaemon() {
       
       # Skip abort daemons if we're preserving them
       if [[ "$preserve_abort_daemon" == "true" && "${label}" == *".abort."* ]]; then
-        log_info "Preserving abort daemon: ${label}"
-        continue
+        # Only preserve the specific active abort daemon, not all abort daemons
+        if [[ -n "$active_abort_daemon" && "$label" == "$active_abort_daemon" ]]; then
+          log_info "Preserving active abort daemon: ${label}"
+          continue
+        elif [[ -z "$active_abort_daemon" ]]; then
+          # If we can't identify the specific one, preserve all abort daemons as safety measure
+          log_info "Preserving abort daemon (no specific active daemon identified): ${label}"
+          continue
+        else
+          log_info "Removing non-active abort daemon: ${label}"
+          # Don't continue - let it be removed
+        fi
       fi
       
       log_info "Unloading daemon: ${label}"
@@ -3951,6 +4170,40 @@ if [ -f "$ABORT_FILE" ]; then
     sleep 2
     if launchctl list | grep -q "$abort_daemon_label"; then
       log_message "✅ SUCCESS: Abort daemon loaded for $defer_hour:$defer_min"
+
+      # Save this as the active abort daemon in the plist
+      log_message "Saving active abort daemon to plist: $abort_daemon_label"
+      
+      # Try multiple methods to save the abort daemon info
+      if defaults write "$PLIST" activeAbortDaemon -string "$abort_daemon_label" 2>/dev/null; then
+        log_message "Successfully wrote to plist with defaults"
+      elif sudo defaults write "$PLIST" activeAbortDaemon -string "$abort_daemon_label" 2>/dev/null; then
+        log_message "Successfully wrote to plist with sudo defaults"
+      else
+        log_message "Failed to write to plist, using fallback file method"
+        # Fallback: create a simple text file that's easier to write
+        echo "$abort_daemon_label" > "/var/tmp/active-abort-daemon-${RUN_ID}.txt" 2>/dev/null
+        chmod 644 "/var/tmp/active-abort-daemon-${RUN_ID}.txt" 2>/dev/null
+      fi
+      
+      # Also save the run ID for easier tracking
+      defaults write "$PLIST" abortRunID -string "$RUN_ID" 2>/dev/null || 
+      sudo defaults write "$PLIST" abortRunID -string "$RUN_ID" 2>/dev/null ||
+      echo "$RUN_ID" > "/var/tmp/active-abort-runid-${RUN_ID}.txt" 2>/dev/null
+      
+      # Also save the run ID for easier tracking
+      defaults write "$PLIST" abortRunID -string "$RUN_ID" 2>/dev/null || {
+        log_message "Failed to save abort run ID to plist"  
+      }
+      
+      # Verify the save worked
+      local saved_daemon=$(defaults read "$PLIST" activeAbortDaemon 2>/dev/null || echo "")
+      if [[ "$saved_daemon" == "$abort_daemon_label" ]]; then
+        log_message "✅ Successfully saved active abort daemon: $saved_daemon"
+      else
+        log_message "❌ Failed to verify saved abort daemon (expected: $abort_daemon_label, got: $saved_daemon)"
+      fi
+      
       osascript -e "display notification \"Installation rescheduled for $defer_hour:$defer_min\" with title \"macOS Upgrade Aborted\"" 2>/dev/null || true
     else
       log_message "❌ CRITICAL: Abort daemon not found in launchctl"
@@ -4741,6 +4994,14 @@ run_erase_install() {
   # Show authentication notice before starting erase-install
   show_auth_notice
   
+  local auth_notice_result=$?
+  
+  # DEBUG: Add these lines
+  log_info "Pre-auth notice completed with return code: $auth_notice_result"
+  log_info "About to start erase-install execution"
+  log_info "Current working directory: $(pwd)"
+  log_info "Script still running, proceeding to erase-install..."
+  
   # Run the installation with proper user context for UI
   log_info "Starting erase-install..."
     
@@ -5238,8 +5499,14 @@ show_prompt() {
   
   case "$selection" in
     "${DIALOG_INSTALL_NOW_TEXT}")
-      # Ensure any existing LaunchDaemons are removed for "Install Now"
-      remove_existing_launchdaemon
+      
+      # Preserve abort daemon if we're running from one
+      if [[ "$RUNNING_FROM_ABORT_DAEMON" == "true" ]]; then
+        log_info "Running from abort daemon - performing selective cleanup"
+        remove_existing_launchdaemon --preserve-abort-daemon
+      else
+        remove_existing_launchdaemon
+      fi
       
       # Check if OS is already at the target version
       log_info "Checking if OS is already up-to-date before proceeding with immediate installation..."
@@ -5320,16 +5587,20 @@ show_prompt() {
       # **CRITICAL FIX: Enhanced daemon creation for abort context**
       log_info "Creating scheduled installation daemon (abort context: ${RUNNING_FROM_ABORT_DAEMON:-false})"
       
-      # **NEW: Special handling for abort context**
+      # Enhanced handling for abort context
       if [[ "${RUNNING_FROM_ABORT_DAEMON}" == "true" ]]; then
         log_info "🔄 ABORT CONTEXT: Creating scheduled daemon with preserved cleanup"
-        
-        # In abort context, be more selective about cleanup
-        # Don't remove all daemons - just clean up safely
-        log_info "Abort context detected - performing selective cleanup"
+        # Get our current abort daemon ID to preserve it
+        local current_abort_daemon_id=$(echo "$0" | grep -o '[0-9]\{14\}' || echo "")
+        if [[ -n "$current_abort_daemon_id" ]]; then
+          log_info "Preserving current abort daemon ID: $current_abort_daemon_id"
+          remove_existing_launchdaemon --preserve-abort-daemon
+        else
+          log_warn "Could not identify current abort daemon ID"
+          remove_existing_launchdaemon
+        fi
       else
         log_info "📋 NORMAL CONTEXT: Standard daemon creation"
-        # Normal cleanup for non-abort context
         remove_existing_launchdaemon
       fi
       
@@ -5412,8 +5683,9 @@ show_prompt() {
           return 1
         fi
         
-        # Refresh state variables after incrementing
-        get_installation_state
+        # Don't call get_installation_state here - it overwrites our just-incremented count
+        # The increment_defer_count function already calls it internally
+        log_info "Defer count incremented to: $CURRENT_DEFER_COUNT"
         
         # Use the updated state variable
         local newCount=$CURRENT_DEFER_COUNT
@@ -6075,6 +6347,28 @@ is_running_from_abort_daemon() {
       export RUNNING_FROM_ABORT_DAEMON=true
       return 0
     fi
+  fi
+  
+  # Fallback: check for abort daemon text files if plist failed
+  local current_run_id=$(date +%Y%m%d%H%M%S)
+  # Try to find any recent abort daemon files
+  for abort_file in /var/tmp/active-abort-daemon-*.txt; do
+    if [ -f "$abort_file" ]; then
+      local saved_daemon=$(cat "$abort_file" 2>/dev/null)
+      if [[ -n "$saved_daemon" ]]; then
+        log_debug "Found abort daemon via fallback file: $saved_daemon"
+        export RUNNING_FROM_ABORT_DAEMON=true
+        return 0
+      fi
+    fi
+  done
+  
+  # Check if any abort daemon is currently loaded that might be our parent
+  local active_abort_daemons=$(launchctl list | grep "com.macjediwizard.eraseinstall.abort" | awk '{print $3}')
+  if [ -n "$active_abort_daemons" ]; then
+    log_debug "Found active abort daemons in launchctl, assuming we're from one"
+    export RUNNING_FROM_ABORT_DAEMON=true
+    return 0
   fi
   
   return 1
