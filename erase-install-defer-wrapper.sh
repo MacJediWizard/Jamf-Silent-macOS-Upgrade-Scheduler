@@ -235,7 +235,7 @@ AUTH_NOTICE_TITLE="Admin Access Required"  # Title for the authentication notice
 AUTH_NOTICE_TITLE_TEST_MODE="$AUTH_NOTICE_TITLE\n            (TEST MODE)"   # Title for auth notice dialog Test Mode
 AUTH_NOTICE_MESSAGE="You will be prompted for admin credentials to complete the macOS upgrade.\n\nIf you do not have admin access, please use Jamf Connect or Self Service to elevate your permissions before continuing."  # Message to display
 AUTH_NOTICE_BUTTON="I'm Ready to Continue" # Text for the continue button
-AUTH_NOTICE_TIMEOUT=120                    # Timeout in seconds (0 = no timeout)
+AUTH_NOTICE_TIMEOUT=0                    # Timeout in seconds (0 = no timeout)
 AUTH_NOTICE_ICON="SF=lock.shield"         # Icon (SF Symbol or path to image)
 AUTH_NOTICE_HEIGHT=300                    # Dialog height in pixels
 AUTH_NOTICE_WIDTH=750                     # Dialog width in pixels
@@ -5745,8 +5745,6 @@ show_prompt() {
           return 1
         fi
       fi
-      
-      reset_deferrals
     ;;
     
     # Handle both normal and test mode defer options
