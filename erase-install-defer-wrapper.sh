@@ -3630,8 +3630,8 @@ create_abort_daemon() {
         <integer>${defer_hour}</integer>
         <key>Minute</key>
         <integer>${defer_min}</integer>
-$([ -n "${defer_day}" ] && printf "        <key>Day</key>\n        <integer>%d</integer>\n" "${defer_day}")
-$([ -n "${defer_month}" ] && printf "        <key>Month</key>\n        <integer>%d</integer>\n" "${defer_month}")
+$([ -n "${defer_day}" ] && [ "${defer_day}" -gt 0 ] && printf "        <key>Day</key>\n        <integer>%d</integer>\n" "${defer_day}")
+$([ -n "${defer_month}" ] && [ "${defer_month}" -gt 0 ] && printf "        <key>Month</key>\n        <integer>%d</integer>\n" "${defer_month}")
     </dict>
     <key>RunAtLoad</key>
     <false/>
@@ -4194,17 +4194,37 @@ if [ -f "$ABORT_FILE" ]; then
   done
   
   # Handle hour rollover
-  if [ $current_hour -ge 24 ]; then
-    current_hour=$((current_hour - 24))
-    defer_day=$(date -v+1d +%d)
-    defer_month=$(date -v+1d +%m)
-  else
-    defer_day=$(date +%d)
-    defer_month=$(date +%m)
-  fi
+if [ $current_hour -ge 24 ]; then
+  current_hour=$((current_hour - 24))
+  defer_day=$(date -v+1d +%d)
+  defer_month=$(date -v+1d +%m)
+else
+  defer_day=$(date +%d)
+  defer_month=$(date +%m)
+fi
+
+# CRITICAL FIX: Ensure defer_day is never 0
+defer_day=$((10#${defer_day}))  # Convert to base-10 integer
+defer_month=$((10#${defer_month}))  # Convert to base-10 integer
+
+# Validate day is in valid range
+if [[ $defer_day -lt 1 || $defer_day -gt 31 ]]; then
+  log_message "ERROR: Invalid defer_day calculated: $defer_day - using today's date"
+  defer_day=$(date +%d)
+  defer_day=$((10#${defer_day}))
+fi
+
+# Validate month is in valid range  
+if [[ $defer_month -lt 1 || $defer_month -gt 12 ]]; then
+  log_message "ERROR: Invalid defer_month calculated: $defer_month - using current month"
+  defer_month=$(date +%m)
+  defer_month=$((10#${defer_month}))
+fi
+
+log_message "✅ VALIDATED: defer_day=$defer_day, defer_month=$defer_month"
   
   # Format with leading zeros
-  defer_hour=$(printf "%02d" $current_hour)
+  defer_hour=$(printf "%02d" $((10#$current_hour)))
   defer_min=$(printf "%02d" $current_min)
   
   log_message "🎯 SCHEDULING FOR: $defer_hour:$defer_min"
@@ -4257,7 +4277,7 @@ if [ -f "$ABORT_FILE" ]; then
       }
       
       # Verify the save worked
-      local saved_daemon=$(defaults read "$PLIST" activeAbortDaemon 2>/dev/null || echo "")
+      saved_daemon=$(defaults read "$PLIST" activeAbortDaemon 2>/dev/null || echo "")
       if [[ "$saved_daemon" == "$abort_daemon_label" ]]; then
         log_message "✅ Successfully saved active abort daemon: $saved_daemon"
       else
