@@ -5670,13 +5670,31 @@ show_prompt() {
       # Enhanced handling for abort context
       if [[ "${RUNNING_FROM_ABORT_DAEMON}" == "true" ]]; then
         log_info "🔄 ABORT CONTEXT: Creating scheduled daemon with preserved cleanup"
-        # Get our current abort daemon ID to preserve it
-        local current_abort_daemon_id=$(echo "$0" | grep -o '[0-9]\{14\}' || echo "")
+        # Get our current abort daemon ID from environment or parent process
+        local current_abort_daemon_id=""
+        
+        # Try multiple methods to get the abort daemon ID
+        if [ -n "$PPID" ]; then
+          local parent_cmd=$(ps -o command= -p "$PPID" 2>/dev/null || echo "")
+          current_abort_daemon_id=$(echo "$parent_cmd" | grep -o '[0-9]\{14\}' || echo "")
+        fi
+        
+        # Fallback: check for any active abort daemon in plist
+        if [[ -z "$current_abort_daemon_id" ]]; then
+          current_abort_daemon_id=$(defaults read "${PLIST}" abortRunID 2>/dev/null || echo "")
+        fi
+        
+        # Fallback: get from script name/path
+        if [[ -z "$current_abort_daemon_id" ]]; then
+          current_abort_daemon_id=$(echo "$0" | grep -o '[0-9]\{14\}' || echo "")
+        fi
+        
         if [[ -n "$current_abort_daemon_id" ]]; then
-          log_info "Preserving current abort daemon ID: $current_abort_daemon_id"
-          remove_existing_launchdaemon --preserve-abort-daemon
+          log_info "✅ Preserving current abort daemon ID: $current_abort_daemon_id"
+          # DON'T remove existing daemons when running from abort context
+          log_info "Skipping daemon cleanup to preserve abort daemon"
         else
-          log_warn "Could not identify current abort daemon ID"
+          log_warn "⚠️ Could not identify current abort daemon ID - proceeding with normal cleanup"
           remove_existing_launchdaemon
         fi
       else
