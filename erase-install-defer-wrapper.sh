@@ -2737,23 +2737,57 @@ $([[ "$USE_ABORT_BUTTON" == "true" ]] && echo "  --button2text '${ABORT_BUTTON_T
 DIALOG_RESULT=\$?
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog completed with status: \$DIALOG_RESULT" >> "\$LOG_FILE"
 
-# ENHANCED ABORT DETECTION - Parse JSON output for button click
-echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Parsing dialog JSON output for abort detection" >> "\$LOG_FILE"
+# ENHANCED ABORT DETECTION - Multiple detection methods
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting abort detection with multiple methods" >> "\$LOG_FILE"
 
-# Check if dialog output file exists and parse it
-if [ -f "\$DIALOG_OUTPUT_FILE" ]; then
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Dialog output file found, parsing JSON" >> "\$LOG_FILE"
+# Method 1: Check dialog exit code first (most reliable for button detection)
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Method 1 - Dialog exit code: \$DIALOG_RESULT" >> "\$LOG_FILE"
+ABORT_DETECTED=false
+
+# SwiftDialog typically returns exit code 2 when button 2 is clicked
+if [ \$DIALOG_RESULT -eq 2 ]; then
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Exit code 2 detected - abort button clicked" >> "\$LOG_FILE"
+  ABORT_DETECTED=true
+fi
+
+# Method 2: Check JSON file if exit code didn't indicate abort
+if [ "\$ABORT_DETECTED" = "false" ] && [ -f "\$DIALOG_OUTPUT_FILE" ]; then
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Method 2 - Checking JSON output file" >> "\$LOG_FILE"
   
-  # Extract button number from JSON output (same method as show_preinstall)
-  BUTTON_CLICKED=\$(cat "\$DIALOG_OUTPUT_FILE" | grep "button" | cut -d':' -f2 | tr -d '" ,')
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Button clicked: '\$BUTTON_CLICKED'" >> "\$LOG_FILE"
-  
-  # Log the full JSON for debugging
-  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Full dialog JSON output:" >> "\$LOG_FILE"
-  cat "\$DIALOG_OUTPUT_FILE" >> "\$LOG_FILE" 2>&1
-  
-  # Check if abort button (button 2) was clicked
-  if [[ "\$BUTTON_CLICKED" == "2" ]]; then
+  # Check if file has content
+  if [ -s "\$DIALOG_OUTPUT_FILE" ]; then
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] JSON file has content, parsing..." >> "\$LOG_FILE"
+    
+    # Log the full JSON for debugging
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Full dialog JSON output:" >> "\$LOG_FILE"
+    cat "\$DIALOG_OUTPUT_FILE" >> "\$LOG_FILE" 2>&1
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] End of JSON output" >> "\$LOG_FILE"
+    
+    # Try multiple JSON parsing methods
+    BUTTON_CLICKED=\$(cat "\$DIALOG_OUTPUT_FILE" | grep "button" | cut -d':' -f2 | tr -d '" ,' | xargs)
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Parsed button value: '\$BUTTON_CLICKED'" >> "\$LOG_FILE"
+    
+    if [[ "\$BUTTON_CLICKED" == "2" ]]; then
+      echo "[\$(date '+%Y-%m-%d %H:%M:%S')] JSON parsing detected abort button" >> "\$LOG_FILE"
+      ABORT_DETECTED=true
+    fi
+  else
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] JSON file is empty - SwiftDialog may not support JSON with timer/progress" >> "\$LOG_FILE"
+  fi
+else
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Skipping JSON check - abort already detected or file missing" >> "\$LOG_FILE"
+fi
+
+# Method 3: Final fallback - check for abort signal file created by another process
+if [ "\$ABORT_DETECTED" = "false" ] && [ -f "/var/tmp/erase-install-abort-${run_id}" ]; then
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Method 3 - Found existing abort signal file" >> "\$LOG_FILE"
+  ABORT_DETECTED=true
+fi
+
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Final abort detection result: \$ABORT_DETECTED" >> "\$LOG_FILE"
+
+# Process abort if detected by any method
+if [ "\$ABORT_DETECTED" = "true" ]; then
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ ABORT BUTTON CLICKED - Starting abort processing" >> "\$LOG_FILE"
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Run ID: ${run_id}" >> "\$LOG_FILE"
 
