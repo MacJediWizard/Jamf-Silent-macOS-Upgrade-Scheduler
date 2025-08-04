@@ -165,11 +165,11 @@ LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"       # Label for L
 LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"  # Path to LaunchDaemon
 #
 # ---- Feature Toggles ----
-TEST_MODE=true                      # Set to false for production (when true, deferrals are shortened to 5 minutes)
-PREVENT_ALL_REBOOTS=true            # SAFETY FEATURE: Set to true to prevent any reboots during testing
-SKIP_OS_VERSION_CHECK=true         # Set to true to skip OS version checking for testing purposes
+TEST_MODE=false                      # Set to false for production (when true, deferrals are shortened to 5 minutes)
+PREVENT_ALL_REBOOTS=false            # SAFETY FEATURE: Set to true to prevent any reboots during testing
+SKIP_OS_VERSION_CHECK=false         # Set to true to skip OS version checking for testing purposes
 AUTO_INSTALL_DEPENDENCIES=true      # Automatically install erase-install and SwiftDialog if missing
-DEBUG_MODE=true                     # Enable detailed logging
+DEBUG_MODE=false                     # Enable detailed logging
 #
 # ---- Logging Configuration ----
 MAX_LOG_SIZE_MB=10                  # Maximum log file size before rotation
