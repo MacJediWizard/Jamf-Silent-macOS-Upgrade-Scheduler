@@ -31,6 +31,16 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.7.0 - PRODUCTION READY: Fixed critical scheduled installation and counter reset bugs
+#         - FIXED: Helper script syntax error preventing scheduled installations from executing
+#         - FIXED: Race condition causing abort count corruption after successful installations
+#         - FIXED: Missing reset logic in scheduled installations (counters stayed at max values)
+#         - FIXED: Watchdog script abort processing after successful installation completion
+#         - ENHANCED: Added comprehensive reset logic to scheduled installation workflow
+#         - ENHANCED: Improved error handling and logging for scheduled installation debugging
+#         - VERIFIED: Complete deferral system working (0/3 → 1/3 → 2/3 → 3/3 → force install → reset)
+#         - VERIFIED: Complete abort system working (0/3 → 1/3 → 2/3 → 3/3 → no abort button → reset)
+#         - VERIFIED: Scheduled installations execute properly with UI and complete with counter reset
 # v1.6.5 - COMPLETE: Fixed deferral state persistence and abort functionality with scheduling
 #         - FIXED: Removed premature reset calls that were clearing deferral state too early
 #         - FIXED: Added proper reset only after successful installation completion
@@ -141,7 +151,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.6.5"              # Current version of this script
+SCRIPT_VERSION="1.7.0"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -2826,7 +2836,6 @@ osascript -e "display notification \"Installation aborted and will be reschedule
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ ABORT PROCESSING COMPLETE - Exiting helper script" >> "\$LOG_FILE"
 # Exit without creating trigger file
 exit 0
-fi
 else
     echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ Dialog output file not found - cannot parse abort status" >> "\$LOG_FILE"
     echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Expected file: \$DIALOG_OUTPUT_FILE" >> "\$LOG_FILE"
@@ -4165,6 +4174,13 @@ if [ -f "$ABORT_FILE" ]; then
     exit 0
   fi
   
+  # CHECK: Don't process abort if installation already completed successfully
+  if [ -f "/var/tmp/erase-install-success-${RUN_ID}" ]; then
+    log_message "Installation completed successfully - ignoring stale abort signal"
+    rm -f "$ABORT_FILE" 2>/dev/null
+    exit 0
+  fi
+  
   # Increment abort count with verification
   log_message "📊 INCREMENTING ABORT COUNT"
   abort_count=$(defaults read "$PLIST" abortCount 2>/dev/null || echo 0)
@@ -4502,6 +4518,15 @@ eval "$CMD"
 # Save exit code with enhanced error handling
 RESULT=$?
 log_message "erase-install completed with exit code: $RESULT"
+
+# Reset counters if installation was successful
+if [ $RESULT -eq 0 ]; then
+  log_message "Installation completed successfully. Resetting deferral and abort counts."
+  defaults write "${PLIST}" deferCount -int 0
+  defaults write "${PLIST}" abortCount -int 0
+  defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+  log_message "All counters reset successfully"
+fi
 
 # Enhanced error logging for power-related issues
 if [ $RESULT -ne 0 ] && [ "$CHECK_POWER" = true ]; then

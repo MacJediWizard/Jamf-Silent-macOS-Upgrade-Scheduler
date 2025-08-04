@@ -4,7 +4,7 @@ A silent macOS upgrade orchestration wrapper for [Graham Pugh's erase-install](h
 designed for enterprise environments using Jamf Pro or other MDMs.
 
 This script silently pre-caches macOS installers and prompts users only at the final decision point, balancing user flexibility with enforced upgrade deadlines.  
-Now with **automatic dependency installation**, **test mode features**, **pre-authentication notice**, **snooze functionality**, **login-time installation**, and **comprehensive diagnostics**.
+Now with **automatic dependency installation**, **test mode features**, **pre-authentication notice**, **snooze functionality**, **login-time installation**, **emergency abort functionality**, and **comprehensive diagnostics**.
 
 ---
 
@@ -15,6 +15,7 @@ Now with **automatic dependency installation**, **test mode features**, **pre-au
 - 🔐 Pre-authentication notice for standard users to prepare for admin prompts
 - ⏳ 24-hour deferral support (up to 3 times)  
 - ⏰ Snooze option for short-term deferrals (1–4 hours)  
+- 🆘 Emergency abort functionality for scheduled installations (up to 3 times)
 - 🧪 Test mode with quick 5-minute deferrals and OS version check bypass
 - 🔒 Forced upgrade after 72 hours or 3 deferrals  
 - 📅 Flexible scheduling options (today, tomorrow, or at next login)  
@@ -69,6 +70,7 @@ The second policy runs this wrapper script. It handles:
 - Prompting the user via SwiftDialog
 - Displaying pre-authentication notice for standard users
 - Tracking deferrals and enforcing upgrade deadlines
+- Managing emergency abort functionality for scheduled installations
 - Scheduling installations for later in the day or next login
 - Initiating immediate upgrades if required
 
@@ -82,9 +84,10 @@ At the top of the script, these options are configurable:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SCRIPT_VERSION` | Current version of this script | `1.5.5` |
+| `SCRIPT_VERSION` | Current version of this script | `1.7.0` |
 | `INSTALLER_OS` | Target macOS version to upgrade to | `15` |
 | `MAX_DEFERS` | Maximum allowed 24-hour deferrals | `3` |
+| `MAX_ABORTS` | Maximum allowed emergency aborts | `3` |
 | `FORCE_TIMEOUT_SECONDS` | Force install after timeout | `259200` |
 | `PLIST` | Preferences file location | `/Library/Preferences/com.macjediwizard.eraseinstall.plist` |
 | `SCRIPT_PATH` | Path to erase-install script | `/Library/Management/erase-install/erase-install.sh` |
@@ -101,6 +104,7 @@ At the top of the script, these options are configurable:
 | `DIALOG_SCHEDULE_TODAY_TEXT` | Text for 'Schedule Today' option | `"Schedule Today"` |
 | `DIALOG_DEFER_TEXT` | Text for 'Defer 24 Hours' option | `"Defer 24 Hours"` |
 | `DIALOG_DEFER_TEXT_TEST_MODE` | Text for test mode defer option | `"Defer 5 Minutes (TEST MODE)"` |
+| `ABORT_BUTTON_TEXT` | Text for emergency abort button | `"Abort (Emergency)"` |
 | `DIALOG_ICON` | Dialog icon (SF Symbol or path) | `"SF=gear"` |
 | `DIALOG_POSITION` | Dialog window position on screen | `"topright"` |
 | `SHOW_AUTH_NOTICE` | Enable pre-authentication notice | `true` |
@@ -112,9 +116,22 @@ At the top of the script, these options are configurable:
 
 ---
 
+## Emergency Abort Functionality
+
+Version 1.7.0 introduces comprehensive emergency abort functionality for scheduled installations:
+
+- **Abort Button**: Configurable "Abort (Emergency)" button appears in scheduled installation dialogs
+- **Abort Limits**: Users can abort up to 3 times before reaching force install mode
+- **Automatic Rescheduling**: After abort, installation is automatically rescheduled with configurable delay
+- **Abort Enforcement**: After 3 aborts, scheduled dialogs show no abort button (force install mode)
+- **Counter Reset**: Abort counts reset to 0 after successful installation completion
+- **Independent Tracking**: Abort counts are separate from deferral counts for flexible policy enforcement
+
+---
+
 ## Pre-Authentication Notice Feature
 
-To improve user experience in environments where users operate with standard accounts but need temporary admin privileges for installation, version 1.5.5 introduces a pre-authentication notice:
+To improve user experience in environments where users operate with standard accounts but need temporary admin privileges for installation, version 1.7.0 includes a pre-authentication notice:
 
 - **User Notification**: Displays a dialog informing users they'll need admin credentials before the actual prompt appears
 - **Preparation Time**: Allows standard users to obtain admin privileges via Jamf Connect or Self Service
@@ -135,6 +152,7 @@ When `TEST_MODE=true`:
 - Dialog displays "TEST MODE" indicator in title
 - Deferral periods are shortened to 5 minutes instead of 24 hours
 - Dialog shows "Defer 5 Minutes (TEST MODE)" instead of "Defer 24 Hours"
+- Abort defer periods are shortened for faster testing
 
 ### OS Version Check Bypass
 
@@ -147,13 +165,17 @@ These testing features allow you to test the complete workflow without waiting f
 
 ---
 
-## Recent Updates (v1.5.5)
+## Recent Updates (v1.7.0)
 
-- 🔐 Added pre-authentication notice dialog before admin credentials prompt
-- 🛡️ Enhanced user experience for standard users in Jamf Connect environments
-- ⚙️ Added configuration option to enable/disable the notice dialog
-- 📝 Added customizable messaging to guide users on obtaining admin rights
-- 🖼️ Implemented notice in both direct execution and scheduled installation workflows
+- 🎉 **PRODUCTION READY**: Fixed all critical bugs preventing enterprise deployment
+- 🔧 **Fixed scheduled installation execution**: Resolved syntax error preventing scheduled installations from running
+- 🔧 **Fixed counter reset logic**: Added missing reset functionality to scheduled installation workflow  
+- 🔧 **Fixed race condition**: Eliminated abort count corruption after successful installations
+- 🔧 **Enhanced abort functionality**: Complete abort cycle now works with proper enforcement and reset
+- ✅ **Verified complete system integration**: All three core systems (defer, abort, scheduled) work seamlessly
+- ✅ **Enterprise testing complete**: Comprehensive validation of all user workflows and edge cases
+- 📊 **Improved logging and diagnostics**: Enhanced debugging capabilities for scheduled installation issues
+- 🚀 **Ready for production deployment**: No known critical bugs remaining
 
 ---
 
@@ -161,12 +183,12 @@ These testing features allow you to test the complete workflow without waiting f
 
 1. Deploy both policies to your Jamf environment:
     - **Installer Caching**: fetches the installer in the background
-    - **Wrapper Execution**: manages prompts, deferrals, and scheduling
-2. Customize dialog text and deferral limits at the top of the script
+    - **Wrapper Execution**: manages prompts, deferrals, aborts, and scheduling
+2. Customize dialog text, deferral limits, and abort settings at the top of the script
 3. Configure the pre-authentication notice based on your environment needs
 4. Test using `TEST_MODE=true` and `SKIP_OS_VERSION_CHECK=true` for quick testing
 5. Run with `--test-os-check` parameter for one-time test mode activation
-6. Monitor logs and user deferral history via the preference plist
+6. Monitor logs and user deferral/abort history via the preference plist
 
 ---
 
@@ -179,11 +201,15 @@ These testing features allow you to test the complete workflow without waiting f
 
 2. **Pre-Authentication Notice**: Before credentials are requested, users see a dialog explaining they'll need admin access.
 
-3. **Admin Authentication**: Graham's erase-install script requests admin credentials.
+3. **Scheduled Installation with Abort**: When scheduled time arrives, users see:
+   - Continue button to proceed with installation
+   - Abort (Emergency) button to postpone installation (up to max aborts)
 
-4. **Installation Process**: The macOS upgrade proceeds with user-facing progress indicators.
+4. **Admin Authentication**: Graham's erase-install script requests admin credentials.
 
-5. **Scheduled Installation**: If scheduled, the system will display both the pre-authentication notice and a countdown dialog at the scheduled time.
+5. **Installation Process**: The macOS upgrade proceeds with user-facing progress indicators.
+
+6. **Counter Management**: After successful installation, both deferral and abort counts reset to 0.
 
 ---
 
