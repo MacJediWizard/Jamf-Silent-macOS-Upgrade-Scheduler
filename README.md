@@ -266,7 +266,7 @@ At the top of the script, these options are configurable:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SCRIPT_VERSION` | Current version of this script | `1.7.2` |
+| `SCRIPT_VERSION` | Current version of this script | `1.7.3` |
 | `INSTALLER_OS` | Target macOS version to upgrade to | `15` |
 | `MAX_DEFERS` | Maximum allowed 24-hour deferrals | `3` |
 | `MAX_ABORTS` | Maximum allowed emergency aborts | `3` |
@@ -348,6 +348,16 @@ These testing features allow you to test the complete workflow without waiting f
 ---
 
 ## Recent Updates
+
+### v1.7.3 (2025-11-06)
+
+- 🔥 **CRITICAL FIX**: Actually implemented `--os` parameter in `run_erase_install()` function
+- 🐛 **Fixed**: v1.7.1 claimed this fix but implementation was never added
+- 🐛 **Fixed**: Script now correctly passes `INSTALLER_OS` to erase-install.sh during execution
+- ✅ **Impact**: Cached installers now used correctly
+- ✅ **Impact**: Downloads correct OS version (15 instead of defaulting to latest 26.x)
+- ✅ **Impact**: Eliminates downloading wrong macOS version
+- ✅ **Impact**: Reduces bandwidth usage by utilizing cached installers
 
 ### v1.7.2 (2025-11-05)
 
