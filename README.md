@@ -42,9 +42,72 @@ Now with **automatic dependency installation**, **test mode features**, **pre-au
 
 ## Jamf Deployment Model
 
-To provide a smooth upgrade experience with minimal disruption, this tool is designed to work with **two separate Jamf policies**:
+To provide a smooth upgrade experience with minimal disruption, this tool is designed to work with **three separate Jamf policies**:
 
-### 1. Installer Caching Policy
+### 1. Deploy Wrapper Script to Persistent Location (Required First)
+
+**⚠️ CRITICAL:** The wrapper script **must be deployed to a persistent location** on each Mac for deferrals, scheduling, and abort functionality to work properly.
+
+**Why this is required:**
+- When users defer installation, the script creates a LaunchDaemon to run 24 hours later
+- When users schedule for a specific time, a LaunchDaemon is created for that time
+- These LaunchDaemons need to call the script from a persistent disk location
+- If the script only exists in Jamf policy memory, deferrals and scheduling will fail
+
+**Jamf Policy: Deploy Wrapper Script**
+
+Create a policy with the following script to deploy the wrapper to a persistent location:
+
+```bash
+#!/bin/bash
+# Jamf Policy: Deploy Wrapper Script
+
+echo "Deploying macOS upgrade wrapper script..."
+
+# Create directory
+mkdir -p /Library/Management/erase-install
+
+# Download directly from GitHub (always gets latest version)
+curl -L -o /Library/Management/erase-install/erase-install-defer-wrapper.sh \
+  "https://github.com/MacJediWizard/Jamf-Silent-macOS-Upgrade-Scheduler/releases/download/v1.7.2/erase-install-defer-wrapper.sh"
+
+# Make executable
+chmod +x /Library/Management/erase-install/erase-install-defer-wrapper.sh
+
+# Verify deployment
+if [ -x "/Library/Management/erase-install/erase-install-defer-wrapper.sh" ]; then
+  echo "✅ Script deployed successfully to: /Library/Management/erase-install/erase-install-defer-wrapper.sh"
+  ls -lh /Library/Management/erase-install/erase-install-defer-wrapper.sh
+else
+  echo "❌ ERROR: Script deployment failed"
+  exit 1
+fi
+```
+
+**Jamf Policy Configuration:**
+
+```
+General:
+  Display Name: Deploy macOS Upgrade Wrapper Script
+  Trigger: Enrollment Complete, Recurring Check-in, or Custom
+  Execution Frequency: Once per computer
+
+Scripts:
+  Priority: Before
+  Script: [Upload the deployment script above]
+
+Scope:
+  Targets: All computers or specific smart groups
+```
+
+**How the script auto-detects its location:**
+- The wrapper automatically detects where it's located on disk (lines 356-369)
+- It stores this path and uses it when creating LaunchDaemons
+- Works regardless of where you deploy it (recommended: `/Library/Management/erase-install/`)
+
+---
+
+### 2. Installer Caching Policy
 
 Run this policy ahead of time to silently download and cache the macOS installer. This ensures that the upgrade can begin immediately when triggered later by the wrapper, without the delay of downloading.
 
@@ -65,9 +128,11 @@ sudo /Library/Management/erase-install/erase-install.sh \
 
 This policy should be scheduled to run during business hours or off-peak times, ensuring that the installer is already cached locally when needed.
 
-### 2. Wrapper Execution Policy
+---
 
-The second policy runs this wrapper script. It handles:
+### 3. Wrapper Execution Policy
+
+The third policy executes the wrapper script from its persistent location. It handles:
 
 - Prompting the user via SwiftDialog
 - Displaying pre-authentication notice for standard users
@@ -76,7 +141,36 @@ The second policy runs this wrapper script. It handles:
 - Scheduling installations for later in the day or next login
 - Initiating immediate upgrades if required
 
-This script is fully self-contained and **remains available offline** after deployment, allowing it to be triggered by LaunchDaemons, login hooks, or local schedules without requiring Jamf network connectivity.
+**Jamf Policy: Execute Wrapper Script**
+
+```bash
+#!/bin/bash
+# Execute the deployed wrapper script
+
+/Library/Management/erase-install/erase-install-defer-wrapper.sh
+```
+
+**Jamf Policy Configuration:**
+
+```
+General:
+  Display Name: macOS Upgrade - Start Process
+  Trigger: Self Service, Custom, or Recurring Check-in
+  Execution Frequency: Ongoing
+
+Scripts:
+  Script: [Upload the execution script above]
+
+Scope:
+  Targets: Computers that need upgrading
+  Exclusions: Smart Group "macOS Upgrade Script Currently Running" (see duplicate prevention section)
+```
+
+**How it works:**
+- Script executes from persistent location (`/Library/Management/erase-install/`)
+- Creates LaunchDaemons that reference the same persistent path
+- LaunchDaemons can trigger the script for deferrals/scheduling without Jamf connectivity
+- Script remains available offline for local execution
 
 ---
 
@@ -289,14 +383,16 @@ These testing features allow you to test the complete workflow without waiting f
 
 ## Usage
 
-1. Deploy both policies to your Jamf environment:
-    - **Installer Caching**: fetches the installer in the background
-    - **Wrapper Execution**: manages prompts, deferrals, aborts, and scheduling
-2. Customize dialog text, deferral limits, and abort settings at the top of the script
+1. Deploy all three policies to your Jamf environment **in this order**:
+    - **Deploy Wrapper Script** (Policy #1): Deploys script to persistent location on Mac
+    - **Installer Caching** (Policy #2): Fetches the macOS installer in the background
+    - **Wrapper Execution** (Policy #3): Manages prompts, deferrals, aborts, and scheduling
+2. Customize dialog text, deferral limits, and abort settings at the top of the script (before deployment)
 3. Configure the pre-authentication notice based on your environment needs
-4. Test using `TEST_MODE=true` and `SKIP_OS_VERSION_CHECK=true` for quick testing
-5. Run with `--test-os-check` parameter for one-time test mode activation
-6. Monitor logs and user deferral/abort history via the preference plist
+4. Implement duplicate prevention using Extension Attribute and Smart Group (see above)
+5. Test using `TEST_MODE=true` and `SKIP_OS_VERSION_CHECK=true` for quick testing
+6. Run with `--test-os-check` parameter for one-time test mode activation
+7. Monitor logs and user deferral/abort history via the preference plist
 
 ---
 
