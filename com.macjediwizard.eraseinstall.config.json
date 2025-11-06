@@ -1,0 +1,118 @@
+{
+  "_comment": "macOS Upgrade Wrapper Configuration - Deploy via Jamf Configuration Profile",
+  "_version": "2.0.0",
+  "_description": "All configurable settings for erase-install-defer-wrapper.sh",
+
+  "core_settings": {
+    "SCRIPT_VERSION": "2.0.0",
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 3,
+    "FORCE_TIMEOUT_SECONDS": 259200
+  },
+
+  "file_paths": {
+    "PLIST": "/Library/Preferences/com.macjediwizard.eraseinstall.plist",
+    "SCRIPT_PATH": "/Library/Management/erase-install/erase-install.sh",
+    "DIALOG_BIN": "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog",
+    "DIALOG_BIN_FALLBACK": "/usr/local/bin/dialog",
+    "LAUNCHDAEMON_LABEL": "com.macjediwizard.eraseinstall.schedule",
+    "LAUNCHDAEMON_PATH": "/Library/LaunchDaemons/com.macjediwizard.eraseinstall.schedule.plist"
+  },
+
+  "feature_toggles": {
+    "TEST_MODE": false,
+    "PREVENT_ALL_REBOOTS": false,
+    "SKIP_OS_VERSION_CHECK": false,
+    "AUTO_INSTALL_DEPENDENCIES": true,
+    "DEBUG_MODE": false
+  },
+
+  "logging": {
+    "MAX_LOG_SIZE_MB": 10,
+    "MAX_LOG_FILES": 5
+  },
+
+  "main_dialog": {
+    "DIALOG_TITLE": "macOS Upgrade Required",
+    "DIALOG_TITLE_TEST_MODE": "macOS Upgrade Required\n                (TEST MODE)",
+    "DIALOG_MESSAGE": "Please install macOS {{INSTALLER_OS}}. Select an action:",
+    "DIALOG_ICON": "SF=gear,weight=bold,size=128",
+    "DIALOG_POSITION": "topright",
+    "DIALOG_HEIGHT": 250,
+    "DIALOG_WIDTH": 650,
+    "DIALOG_MESSAGEFONT": "size=16",
+    "DIALOG_INSTALL_NOW_TEXT": "Install Now",
+    "DIALOG_SCHEDULE_TODAY_TEXT": "Schedule Today",
+    "DIALOG_DEFER_TEXT": "Defer 24 Hours",
+    "DIALOG_DEFER_TEXT_TEST_MODE": "Defer 5 Minutes   (TEST MODE)",
+    "DIALOG_CONFIRM_TEXT": "Confirm"
+  },
+
+  "preinstall_dialog": {
+    "PREINSTALL_TITLE": "macOS Upgrade Starting",
+    "PREINSTALL_TITLE_TEST_MODE": "macOS Upgrade Starting\n                (TEST MODE)",
+    "PREINSTALL_MESSAGE": "Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds, or click Continue to begin now.",
+    "PREINSTALL_PROGRESS_TEXT_MESSAGE": "Installation will begin in 60 seconds...",
+    "PREINSTALL_CONTINUE_TEXT": "Continue Now",
+    "PREINSTALL_COUNTDOWN": 60,
+    "PREINSTALL_HEIGHT": 350,
+    "PREINSTALL_WIDTH": 650,
+    "PREINSTALL_DIALOG_MESSAGEFONT": "size=16"
+  },
+
+  "scheduled_dialog": {
+    "SCHEDULED_TITLE": "macOS Upgrade Scheduled",
+    "SCHEDULED_TITLE_TEST_MODE": "macOS Upgrade Scheduled\n                (TEST MODE)",
+    "SCHEDULED_MESSAGE": "Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds,\n\n or click Continue to begin now.",
+    "SCHEDULED_PROGRESS_TEXT_MESSAGE": "Installation will begin in 60 seconds.....",
+    "SCHEDULED_CONTINUE_TEXT": "Continue Now",
+    "SCHEDULED_COUNTDOWN": 60,
+    "SCHEDULED_HEIGHT": 250,
+    "SCHEDULED_WIDTH": 650,
+    "SCHEDULED_CONTINUE_HEIGHT": 350,
+    "SCHEDULED_CONTINUE_WIDTH": 750,
+    "SCHEDULED_DIALOG_MESSAGEFONT": "size=16"
+  },
+
+  "error_dialog": {
+    "ERROR_DIALOG_TITLE": "Invalid Time",
+    "ERROR_DIALOG_MESSAGE": "The selected time is invalid.\nPlease select a valid time (00:00-23:59).",
+    "ERROR_DIALOG_ICON": "SF=exclamationmark.triangle",
+    "ERROR_DIALOG_HEIGHT": 350,
+    "ERROR_DIALOG_WIDTH": 650,
+    "ERROR_CONTINUE_TEXT": "OK"
+  },
+
+  "erase_install_options": {
+    "REBOOT_DELAY": 60,
+    "REINSTALL": true,
+    "NO_FS": true,
+    "CHECK_POWER": true,
+    "POWER_WAIT_LIMIT": 300,
+    "MIN_DRIVE_SPACE": 50,
+    "CLEANUP_AFTER_USE": true
+  },
+
+  "auth_notice": {
+    "SHOW_AUTH_NOTICE": true,
+    "AUTH_NOTICE_TITLE": "Admin Access Required",
+    "AUTH_NOTICE_TITLE_TEST_MODE": "Admin Access Required\n            (TEST MODE)",
+    "AUTH_NOTICE_MESSAGE": "You will be prompted for admin credentials to complete the macOS upgrade.\n\nIf you do not have admin access, please use Jamf Connect or Self Service to elevate your permissions before continuing.",
+    "AUTH_NOTICE_BUTTON": "I'm Ready to Continue",
+    "AUTH_NOTICE_TIMEOUT": 0,
+    "AUTH_NOTICE_ICON": "SF=lock.shield",
+    "AUTH_NOTICE_HEIGHT": 300,
+    "AUTH_NOTICE_WIDTH": 750
+  },
+
+  "abort_button": {
+    "ENABLE_ABORT_BUTTON": true,
+    "ABORT_BUTTON_TEXT": "Abort (Emergency)",
+    "ABORT_DEFER_MINUTES": 5,
+    "MAX_ABORTS": 3,
+    "ABORT_COUNTDOWN": 15,
+    "ABORT_HEIGHT": 250,
+    "ABORT_WIDTH": 750,
+    "ABORT_ICON": "SF=exclamationmark.triangle"
+  }
+}
