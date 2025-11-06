@@ -53,13 +53,15 @@ Run this policy ahead of time to silently download and cache the macOS installer
 ```bash
 sudo /Library/Management/erase-install/erase-install.sh \
   --download \
-  --os=15 \
+  --os 15 \
   --no-fs \
   --check-power \
-  --min-drive-space=50 \
+  --min-drive-space 50 \
   --overwrite \
   --silent
 ```
+
+**Note:** The `--os 15` parameter is critical to ensure you're downloading the correct macOS version. Without it, erase-install will default to the latest available version.
 
 This policy should be scheduled to run during business hours or off-peak times, ensuring that the installer is already cached locally when needed.
 
@@ -78,13 +80,170 @@ This script is fully self-contained and **remains available offline** after depl
 
 ---
 
+## Preventing Duplicate Policy Executions
+
+The wrapper script includes built-in locking mechanisms to prevent simultaneous executions. However, when deployed as a Jamf policy, additional safeguards are recommended to prevent Jamf from triggering the policy multiple times while it's still running (in "Pending" state).
+
+### Option 1: Smart Group Exclusion (Recommended)
+
+This Jamf-native solution automatically excludes computers from the policy scope while the script is running.
+
+**Step 1: Create Extension Attribute**
+
+Create a new Extension Attribute in Jamf Pro:
+
+```
+Display Name: macOS Upgrade Script Status
+Description: Detects if the upgrade wrapper is currently running
+Data Type: String
+Input Type: Script
+```
+
+**Extension Attribute Script:**
+
+```bash
+#!/bin/bash
+# Check if upgrade wrapper is currently running
+
+if [ -f "/tmp/erase-install-wrapper-main.lock" ] || \
+   [ -f "/var/run/erase-install-wrapper.lock" ]; then
+    echo "<result>Running</result>"
+    exit 0
+fi
+
+if pgrep -f "erase-install-defer-wrapper.sh" > /dev/null 2>&1; then
+    echo "<result>Running</result>"
+    exit 0
+fi
+
+if launchctl list | grep -q "com.macjediwizard.eraseinstall.schedule"; then
+    echo "<result>Running</result>"
+    exit 0
+fi
+
+echo "<result>Not Running</result>"
+```
+
+**Step 2: Create Smart Group**
+
+```
+Name: macOS Upgrade Script Currently Running
+Criteria:
+  - macOS Upgrade Script Status | is | Running
+```
+
+**Step 3: Add Exclusion to Your Wrapper Policy**
+
+```
+Policy → Scope Tab:
+  Targets: [Your deployment group]
+  Exclusions:
+    - Smart Group: "macOS Upgrade Script Currently Running"
+```
+
+**Step 4: Enable Inventory Updates**
+
+In your wrapper policy:
+
+```
+Maintenance Tab:
+  [x] Update Inventory
+```
+
+**How it works:**
+- Policy starts → Script creates lock file
+- Inventory update → Extension Attribute detects "Running"
+- Smart Group includes computer → Policy automatically excludes it
+- Script completes → Next inventory update shows "Not Running"
+- Smart Group removes computer → Policy can run again
+
+---
+
+### Option 2: Pre-Flight Check Policy
+
+Create a separate policy that runs before your main wrapper policy to verify no duplicate is running.
+
+**Pre-Flight Policy Configuration:**
+
+```
+General:
+  Display Name: macOS Upgrade - Pre-Flight Check
+  Trigger: Same as your main policy (e.g., check-in, custom trigger)
+  Execution Frequency: Ongoing
+  Priority: Before (runs before main policy)
+
+Scripts:
+  Priority: Before
+```
+
+**Pre-Flight Policy Script:**
+
+```bash
+#!/bin/bash
+# Pre-flight check for upgrade wrapper
+
+echo "Checking if upgrade wrapper is already running..."
+
+# Check for lock files
+if [ -f "/tmp/erase-install-wrapper-main.lock" ] || \
+   [ -f "/var/run/erase-install-wrapper.lock" ]; then
+    echo "Lock file detected. Wrapper already running."
+    touch /tmp/upgrade-blocked
+    exit 1
+fi
+
+# Check for running process
+if pgrep -f "erase-install-defer-wrapper.sh" > /dev/null 2>&1; then
+    echo "Wrapper process already running."
+    touch /tmp/upgrade-blocked
+    exit 1
+fi
+
+# Check for scheduled installation
+if launchctl list | grep -q "com.macjediwizard.eraseinstall.schedule"; then
+    echo "Scheduled installation already active."
+    touch /tmp/upgrade-blocked
+    exit 1
+fi
+
+# Clear any old marker and allow execution
+rm -f /tmp/upgrade-blocked
+echo "Pre-flight check passed. Upgrade can proceed."
+exit 0
+```
+
+**Main Wrapper Policy Script (Add to Beginning):**
+
+Add this check at the very beginning of your wrapper policy script:
+
+```bash
+#!/bin/bash
+
+# Check if blocked by pre-flight check
+if [ -f "/tmp/upgrade-blocked" ]; then
+    echo "Pre-flight check failed. Upgrade already running. Exiting."
+    exit 0
+fi
+
+# Continue with your wrapper script execution below...
+# <rest of your wrapper script>
+```
+
+**How it works:**
+- Pre-flight policy runs first (Priority: Before)
+- If script is running → Creates `/tmp/upgrade-blocked` marker and exits with error
+- Main policy checks for marker → Exits gracefully if found
+- If no duplicate detected → Pre-flight removes marker and main policy proceeds
+
+---
+
 ## Configuration
 
 At the top of the script, these options are configurable:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SCRIPT_VERSION` | Current version of this script | `1.7.0` |
+| `SCRIPT_VERSION` | Current version of this script | `1.7.1` |
 | `INSTALLER_OS` | Target macOS version to upgrade to | `15` |
 | `MAX_DEFERS` | Maximum allowed 24-hour deferrals | `3` |
 | `MAX_ABORTS` | Maximum allowed emergency aborts | `3` |
@@ -165,17 +324,28 @@ These testing features allow you to test the complete workflow without waiting f
 
 ---
 
-## Recent Updates (v1.7.0)
+## Recent Updates
+
+### v1.7.1 (2025-11-05)
+
+- 🔥 **CRITICAL FIX**: Added missing `--os` parameter to erase-install command
+- 🐛 **Fixed**: Script now correctly passes INSTALLER_OS setting to erase-install.sh
+- 🐛 **Fixed**: erase-install was defaulting to latest macOS (15.2.6/build 26) instead of configured version
+- ✅ **Impact**: Script now correctly uses cached macOS 15 installer if available
+- ✅ **Impact**: Downloads specific macOS 15 version instead of latest available
+- 📊 **Impact**: Reduces bandwidth usage by utilizing cached installers
+- 📚 **Added**: Documentation for preventing duplicate Jamf policy executions
+
+### v1.7.0 (2025-08-04)
 
 - 🎉 **PRODUCTION READY**: Fixed all critical bugs preventing enterprise deployment
 - 🔧 **Fixed scheduled installation execution**: Resolved syntax error preventing scheduled installations from running
-- 🔧 **Fixed counter reset logic**: Added missing reset functionality to scheduled installation workflow  
+- 🔧 **Fixed counter reset logic**: Added missing reset functionality to scheduled installation workflow
 - 🔧 **Fixed race condition**: Eliminated abort count corruption after successful installations
 - 🔧 **Enhanced abort functionality**: Complete abort cycle now works with proper enforcement and reset
 - ✅ **Verified complete system integration**: All three core systems (defer, abort, scheduled) work seamlessly
 - ✅ **Enterprise testing complete**: Comprehensive validation of all user workflows and edge cases
 - 📊 **Improved logging and diagnostics**: Enhanced debugging capabilities for scheduled installation issues
-- 🚀 **Ready for production deployment**: No known critical bugs remaining
 
 ---
 
