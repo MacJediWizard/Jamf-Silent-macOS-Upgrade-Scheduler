@@ -42,6 +42,10 @@
 #         - BACKWARDS COMPATIBLE: Falls back to hardcoded defaults if no JSON present
 #         - DOCUMENTATION: Complete JSON config examples and Jamf deployment guides
 #         - JAMF READY: Deploy JSON via Configuration Profile Files and Processes payload
+#         - CRITICAL FIX: Actually implemented --os parameter in run_erase_install() function
+#         - NOTE: v1.7.1 claimed to fix this but implementation was missing from run_erase_install()
+#         - FIXED: Script now correctly passes INSTALLER_OS to erase-install.sh in ALL execution paths
+#         - IMPACT: Ensures cached installers are used and correct OS version is downloaded
 # v1.7.2 - CRITICAL FIX: Fixed version detection to filter by INSTALLER_OS major version
 #         - FIXED: get_available_macos_version() now uses --os parameter with erase-install --list
 #         - FIXED: SOFA fallback now searches for matching major version instead of using latest
@@ -5349,7 +5353,13 @@ run_erase_install() {
   # Build command with proper options
   local cmd_args=()
   cmd_args+=("${SCRIPT_PATH}")
-  
+
+  # CRITICAL: Specify target OS version to use cached installer or download specific version
+  if [[ -n "$INSTALLER_OS" ]]; then
+    cmd_args+=("--os" "$INSTALLER_OS")
+    log_info "Specifying target OS version: $INSTALLER_OS (will use cached installer if available)"
+  fi
+
   # Add options based on configuration variables with improved logging
   if [[ "$REBOOT_DELAY" -gt 0 ]]; then
     cmd_args+=("--rebootdelay" "$REBOOT_DELAY")
