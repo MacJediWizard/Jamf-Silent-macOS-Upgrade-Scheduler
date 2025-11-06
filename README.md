@@ -3,30 +3,39 @@
 A silent macOS upgrade orchestration wrapper for [Graham Pugh's erase-install](https://github.com/grahampugh/erase-install),  
 designed for enterprise environments using Jamf Pro or other MDMs.
 
-This script silently pre-caches macOS installers and prompts users only at the final decision point, balancing user flexibility with enforced upgrade deadlines.  
-Now with **automatic dependency installation**, **test mode features**, **pre-authentication notice**, **snooze functionality**, **login-time installation**, **emergency abort functionality**, and **comprehensive diagnostics**.
+This script silently pre-caches macOS installers and prompts users only at the final decision point, balancing user flexibility with enforced upgrade deadlines.
+Now with **JSON-based configuration management** (v2.0), **automatic dependency installation**, **test mode features**, **pre-authentication notice**, **snooze functionality**, **login-time installation**, **emergency abort functionality**, and **comprehensive diagnostics**.
 
 ---
 
 ## Features
 
-- 🚀 Silent installer download and caching  
-- 🛡 Minimal user interruption  
+### ✨ v2.0 - JSON Configuration Management
+- 📝 **JSON-based configuration** - Manage all settings via easy-to-read JSON files
+- 🎛️ **Centralized management** - Control settings from Jamf Configuration Profiles
+- 🏢 **Per-department configs** - Deploy different settings to different groups
+- ⚡ **Instant updates** - Change settings without redeploying the script
+- 🔄 **Backwards compatible** - Falls back to script defaults if no JSON present
+- 📚 **Complete documentation** - Ready-to-use JSON templates and Jamf guides
+
+### Core Features
+- 🚀 Silent installer download and caching
+- 🛡 Minimal user interruption
 - 🔐 Pre-authentication notice for standard users to prepare for admin prompts
-- ⏳ 24-hour deferral support (up to 3 times)  
-- ⏰ Snooze option for short-term deferrals (1–4 hours)  
+- ⏳ 24-hour deferral support (up to 3 times)
+- ⏰ Snooze option for short-term deferrals (1–4 hours)
 - 🆘 Emergency abort functionality for scheduled installations (up to 3 times)
 - 🧪 Test mode with quick 5-minute deferrals and OS version check bypass
-- 🔒 Forced upgrade after 72 hours or 3 deferrals  
-- 📅 Flexible scheduling options (today, tomorrow, or at next login)  
-- 🔐 Robust directory-based locking mechanism to prevent race conditions  
-- 🎯 Enhanced UI handling with proper user context display  
-- 🛠 Full dry-run testing with erase-install's `--test-run`  
-- 📦 Auto-installs erase-install and swiftDialog if missing  
-- ✍️ Configurable dialog text, button labels, and window position  
-- 🔄 Robust process tracking and cleanup procedures  
-- 📊 Comprehensive system diagnostics for troubleshooting  
-- ✅ Enterprise-grade error handling, structured logging (INFO/WARN/ERROR/DEBUG)  
+- 🔒 Forced upgrade after 72 hours or 3 deferrals
+- 📅 Flexible scheduling options (today, tomorrow, or at next login)
+- 🔐 Robust directory-based locking mechanism to prevent race conditions
+- 🎯 Enhanced UI handling with proper user context display
+- 🛠 Full dry-run testing with erase-install's `--test-run`
+- 📦 Auto-installs erase-install and swiftDialog if missing
+- ✍️ Configurable dialog text, button labels, and window position
+- 🔄 Robust process tracking and cleanup procedures
+- 📊 Comprehensive system diagnostics for troubleshooting
+- ✅ Enterprise-grade error handling, structured logging (INFO/WARN/ERROR/DEBUG)
 - ⚙️ Improved time handling with proper base-10 conversion  
 
 ---
@@ -262,11 +271,34 @@ Maintenance Tab:
 
 ## Configuration
 
-At the top of the script, these options are configurable:
+### ✨ v2.0 - JSON Configuration (Recommended)
+
+The recommended way to configure the wrapper is using **JSON configuration files** deployed via Jamf Configuration Profiles. This allows you to:
+
+- 📝 Manage all settings from Jamf Pro (no script editing required)
+- ⚡ Update settings instantly (changes apply on next policy run)
+- 🏢 Deploy different configs to different departments
+- 📋 Use human-readable JSON format
+
+**Quick Start:**
+
+1. Copy `com.macjediwizard.eraseinstall.config.json` template
+2. Edit settings as needed
+3. Deploy via Jamf Configuration Profile (Files and Processes payload)
+4. Place at: `/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json`
+
+**Documentation:**
+- **Quick Start**: See `JAMF_CONFIG_PROFILE_QUICK_START.md`
+- **Technical Details**: See `V2.0_JSON_CONFIG_IMPLEMENTATION.md`
+- **JSON Template**: See `com.macjediwizard.eraseinstall.config.json`
+
+### Script Defaults (v1.x compatibility)
+
+If no JSON configuration is present, the script falls back to these hardcoded defaults:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SCRIPT_VERSION` | Current version of this script | `1.7.2` |
+| `SCRIPT_VERSION` | Current version of this script | `2.0.0` |
 | `INSTALLER_OS` | Target macOS version to upgrade to | `15` |
 | `MAX_DEFERS` | Maximum allowed 24-hour deferrals | `3` |
 | `MAX_ABORTS` | Maximum allowed emergency aborts | `3` |
@@ -348,6 +380,19 @@ These testing features allow you to test the complete workflow without waiting f
 ---
 
 ## Recent Updates
+
+### v2.0.0 (2025-11-06) - MAJOR RELEASE
+
+- 🎉 **NEW: JSON Configuration Management** - Manage all wrapper settings via JSON files
+- 📝 **JSON Support**: Load settings from Jamf Configuration Profiles or local JSON files
+- 🎛️ **Three-tier priority**: Managed JSON (Jamf) > Local JSON > Script Defaults
+- 🏢 **Per-department configs**: Deploy different JSON configs to different groups
+- ⚡ **Instant updates**: Change settings in Jamf without redeploying script
+- 🔄 **Backwards compatible**: Falls back to hardcoded defaults if no JSON present
+- 📚 **Complete documentation**: JSON templates, Jamf deployment guides, quick start guide
+- 🛠️ **Native parsing**: Uses macOS plutil (no external dependencies)
+- ✅ **50+ settings**: All User Configuration Section options available in JSON
+- 📋 **Example configs**: Standard, Aggressive, QA/Testing configurations included
 
 ### v1.7.2 (2025-11-05)
 
