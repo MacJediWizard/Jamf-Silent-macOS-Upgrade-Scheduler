@@ -31,6 +31,12 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.7.1 - CRITICAL FIX: Added missing --os parameter to erase-install command
+#         - FIXED: Script now passes INSTALLER_OS setting to erase-install using --os parameter
+#         - FIXED: erase-install was defaulting to latest macOS (15.2.6/build 26) instead of configured version
+#         - IMPACT: Script now correctly uses cached macOS 15 installer if available
+#         - IMPACT: Downloads specific macOS 15 version instead of latest available
+#         - IMPACT: Reduces bandwidth usage by utilizing cached installers
 # v1.7.0 - PRODUCTION READY: Fixed critical scheduled installation and counter reset bugs
 #         - FIXED: Helper script syntax error preventing scheduled installations from executing
 #         - FIXED: Race condition causing abort count corruption after successful installations
@@ -151,7 +157,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.7.0"              # Current version of this script
+SCRIPT_VERSION="1.7.1"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -4467,6 +4473,12 @@ fi
 if [ "$DEBUG_MODE" = true ]; then
 log_message "Verbose logging enabled for erase-install"
 CMD="$CMD --verbose"
+fi
+
+# Specify target OS version to use cached installer or download specific version
+if [ -n "$INSTALLER_OS" ]; then
+log_message "Specifying target OS version: $INSTALLER_OS (will use cached installer if available)"
+CMD="$CMD --os $INSTALLER_OS"
 fi
 
 # Log command before no-reboot check

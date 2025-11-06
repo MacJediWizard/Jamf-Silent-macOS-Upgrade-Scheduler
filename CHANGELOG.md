@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.1] - 2025-11-05
+### 🔥 CRITICAL FIX - Target macOS Version Not Being Passed to erase-install
+
+#### Fixed - Missing --os Parameter
+- **CRITICAL FIX**: Added missing `--os` parameter when calling erase-install.sh
+- **Root Cause**: Script set `INSTALLER_OS="15"` but never passed `--os 15` to erase-install command
+- **Previous Behavior**: erase-install defaulted to latest available macOS (15.2.6/build 26) ignoring INSTALLER_OS setting
+- **Resolution**: Added `--os $INSTALLER_OS` parameter to command builder (line 4472-4476)
+- **Impact**:
+  - Script now correctly uses cached macOS 15 installer if available
+  - Downloads specific macOS 15 version instead of latest available
+  - Honors INSTALLER_OS configuration setting
+  - Prevents unexpected OS version installations
+  - Reduces bandwidth usage by utilizing cached installers
+
+---
+
 ## [1.7.0] - 2025-08-04
 ### 🎉 PRODUCTION READY - Fixed Critical Scheduled Installation and Counter Reset Bugs
 
