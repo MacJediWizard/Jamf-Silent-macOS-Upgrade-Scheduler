@@ -31,6 +31,11 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.7.2 - CRITICAL FIX: Fixed version detection to filter by INSTALLER_OS major version
+#         - FIXED: get_available_macos_version() now uses --os parameter with erase-install --list
+#         - FIXED: SOFA fallback now searches for matching major version instead of using latest
+#         - IMPACT: targetOSVersion now correctly set to latest macOS 15.x instead of 26.x
+#         - IMPACT: Version checks now compare against correct target version
 # v1.7.1 - CRITICAL FIX: Added missing --os parameter to erase-install command
 #         - FIXED: Script now passes INSTALLER_OS setting to erase-install using --os parameter
 #         - FIXED: erase-install was defaulting to latest macOS (15.2.6/build 26) instead of configured version
@@ -157,7 +162,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.7.1"              # Current version of this script
+SCRIPT_VERSION="1.7.2"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -1409,9 +1414,9 @@ get_available_macos_version() {
   # Create a temporary file for erase-install output
   local tmp_file=$(mktemp)
   
-  # Run erase-install with list-only flag
-  log_info "Running erase-install in list mode..." >&2
-  "${SCRIPT_PATH}" --list > "$tmp_file" 2>&1
+  # Run erase-install with list-only flag, filtered by INSTALLER_OS
+  log_info "Running erase-install in list mode for macOS ${INSTALLER_OS}..." >&2
+  "${SCRIPT_PATH}" --list --os "${INSTALLER_OS}" > "$tmp_file" 2>&1
   
   # Look for the table header line
   local table_start=$(grep -n "│ IDENTIFIER │" "$tmp_file" | cut -d':' -f1)
@@ -1446,18 +1451,26 @@ get_available_macos_version() {
     
     if curl -s --compressed "$feed_url" -o "$json_cache" 2>/dev/null; then
       log_info "Successfully downloaded SOFA JSON feed" >&2
-      
-      # Extract the latest macOS version
-      available_version=$(/usr/bin/plutil -extract "OSVersions.0.Latest.ProductVersion" raw "$json_cache" 2>/dev/null | head -n 1)
-      
+
+      # Loop through OSVersions array to find matching major version
+      log_info "Searching for macOS ${INSTALLER_OS} in SOFA feed..." >&2
+      for i in {0..10}; do
+        local os_version=$(/usr/bin/plutil -extract "OSVersions.$i.Latest.ProductVersion" raw "$json_cache" 2>/dev/null | head -n 1)
+
+        if [[ -n "$os_version" ]]; then
+          # Extract major version from the found version
+          local major_version=$(echo "$os_version" | cut -d. -f1)
+
+          if [[ "$major_version" == "$INSTALLER_OS" ]]; then
+            available_version="$os_version"
+            log_info "Found matching macOS ${INSTALLER_OS} in SOFA: $available_version" >&2
+            break
+          fi
+        fi
+      done
+
       if [[ -z "$available_version" ]]; then
-        # Try the latestProductionVersion as a fallback
-        log_info "Trying latestProductionVersion as a fallback" >&2
-        available_version=$(/usr/bin/plutil -extract "latestProductionVersion" raw "$json_cache" 2>/dev/null | head -n 1)
-      fi
-      
-      if [[ -n "$available_version" ]]; then
-        log_info "Successfully extracted version from SOFA: $available_version" >&2
+        log_warn "Could not find macOS ${INSTALLER_OS} in SOFA feed" >&2
       fi
     else
       log_warn "Failed to download SOFA JSON feed" >&2

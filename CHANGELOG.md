@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.2] - 2025-11-05
+### 🔥 CRITICAL FIX - Version Detection Returns Wrong macOS Version
+
+#### Fixed - get_available_macos_version() Not Filtering by INSTALLER_OS
+- **CRITICAL FIX**: Fixed `get_available_macos_version()` to filter by INSTALLER_OS major version
+- **Root Cause**: Function called `erase-install --list` without `--os` parameter, returning all macOS versions
+- **Previous Behavior**: Function returned macOS 26.x (Tahoe) as latest, stored as targetOSVersion in plist
+- **Resolution**:
+  - Added `--os "${INSTALLER_OS}"` to erase-install --list call (line 1414)
+  - Updated SOFA fallback to loop through versions and match major version (lines 1450-1465)
+- **Impact**:
+  - targetOSVersion now correctly set to latest macOS 15.x instead of 26.x
+  - Version checks now compare against correct target version
+  - Script behavior now matches INSTALLER_OS configuration
+  - Eliminates false "OS not at target" detections
+
+---
+
 ## [1.7.1] - 2025-11-05
 ### 🔥 CRITICAL FIX - Target macOS Version Not Being Passed to erase-install
 
