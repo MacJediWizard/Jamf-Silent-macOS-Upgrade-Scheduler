@@ -84,9 +84,9 @@ This script is fully self-contained and **remains available offline** after depl
 
 The wrapper script includes built-in locking mechanisms to prevent simultaneous executions. However, when deployed as a Jamf policy, additional safeguards are recommended to prevent Jamf from triggering the policy multiple times while it's still running (in "Pending" state).
 
-### Option 1: Smart Group Exclusion (Recommended)
+### Smart Group Exclusion with Extension Attribute
 
-This Jamf-native solution automatically excludes computers from the policy scope while the script is running.
+This Jamf-native solution automatically excludes computers from the policy scope while the script is running, without requiring any modifications to the wrapper script.
 
 **Step 1: Create Extension Attribute**
 
@@ -157,83 +157,12 @@ Maintenance Tab:
 - Script completes → Next inventory update shows "Not Running"
 - Smart Group removes computer → Policy can run again
 
----
-
-### Option 2: Pre-Flight Check Policy
-
-Create a separate policy that runs before your main wrapper policy to verify no duplicate is running.
-
-**Pre-Flight Policy Configuration:**
-
-```
-General:
-  Display Name: macOS Upgrade - Pre-Flight Check
-  Trigger: Same as your main policy (e.g., check-in, custom trigger)
-  Execution Frequency: Ongoing
-  Priority: Before (runs before main policy)
-
-Scripts:
-  Priority: Before
-```
-
-**Pre-Flight Policy Script:**
-
-```bash
-#!/bin/bash
-# Pre-flight check for upgrade wrapper
-
-echo "Checking if upgrade wrapper is already running..."
-
-# Check for lock files
-if [ -f "/tmp/erase-install-wrapper-main.lock" ] || \
-   [ -f "/var/run/erase-install-wrapper.lock" ]; then
-    echo "Lock file detected. Wrapper already running."
-    touch /tmp/upgrade-blocked
-    exit 1
-fi
-
-# Check for running process
-if pgrep -f "erase-install-defer-wrapper.sh" > /dev/null 2>&1; then
-    echo "Wrapper process already running."
-    touch /tmp/upgrade-blocked
-    exit 1
-fi
-
-# Check for scheduled installation
-if launchctl list | grep -q "com.macjediwizard.eraseinstall.schedule"; then
-    echo "Scheduled installation already active."
-    touch /tmp/upgrade-blocked
-    exit 1
-fi
-
-# Clear any old marker and allow execution
-rm -f /tmp/upgrade-blocked
-echo "Pre-flight check passed. Upgrade can proceed."
-exit 0
-```
-
-**Main Wrapper Policy Script (Add to Beginning):**
-
-Add this check at the very beginning of your wrapper policy script:
-
-```bash
-#!/bin/bash
-
-# Check if blocked by pre-flight check
-if [ -f "/tmp/upgrade-blocked" ]; then
-    echo "Pre-flight check failed. Upgrade already running. Exiting."
-    exit 0
-fi
-
-# Continue with your wrapper script execution below...
-# <rest of your wrapper script>
-```
-
-**How it works:**
-- Pre-flight policy runs first (Priority: Before)
-- If script is running → Creates `/tmp/upgrade-blocked` marker and exits with error
-- Main policy checks for marker → Exits gracefully if found
-- If no duplicate detected → Pre-flight removes marker and main policy proceeds
+**Benefits:**
+- ✅ No script modifications required
+- ✅ Fully Jamf-native solution
+- ✅ Works with any trigger type (check-in, login, custom, Self Service)
+- ✅ Automatic detection and exclusion
+- ✅ Compatible with all wrapper features (deferrals, scheduling, abort)
 
 ---
 
