@@ -31,6 +31,13 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v1.7.3 - CRITICAL FIX: Actually implement --os parameter in run_erase_install() function
+#         - FIXED: Added missing --os parameter to erase-install command execution
+#         - NOTE: v1.7.1 changelog claimed this fix but implementation was never added
+#         - FIXED: run_erase_install() now correctly passes INSTALLER_OS to erase-install.sh
+#         - IMPACT: Script now uses cached installers correctly
+#         - IMPACT: Downloads correct OS version (e.g., 15 instead of defaulting to latest)
+#         - IMPACT: Eliminates downloading wrong macOS version (e.g., 26.x instead of 15.x)
 # v1.7.2 - CRITICAL FIX: Fixed version detection to filter by INSTALLER_OS major version
 #         - FIXED: get_available_macos_version() now uses --os parameter with erase-install --list
 #         - FIXED: SOFA fallback now searches for matching major version instead of using latest
@@ -162,7 +169,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.7.2"              # Current version of this script
+SCRIPT_VERSION="1.7.3"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -5151,7 +5158,13 @@ run_erase_install() {
   # Build command with proper options
   local cmd_args=()
   cmd_args+=("${SCRIPT_PATH}")
-  
+
+  # CRITICAL: Specify target OS version to use cached installer or download specific version
+  if [[ -n "$INSTALLER_OS" ]]; then
+    cmd_args+=("--os" "$INSTALLER_OS")
+    log_info "Specifying target OS version: $INSTALLER_OS (will use cached installer if available)"
+  fi
+
   # Add options based on configuration variables with improved logging
   if [[ "$REBOOT_DELAY" -gt 0 ]]; then
     cmd_args+=("--rebootdelay" "$REBOOT_DELAY")
