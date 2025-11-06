@@ -31,6 +31,17 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
+# v2.0.0 - MAJOR RELEASE: JSON-based configuration management
+#         - NEW: JSON configuration file support for centralized settings management
+#         - NEW: Managed preferences support for Jamf Configuration Profile deployment
+#         - NEW: load_json_config() function loads settings from JSON with fallback to script defaults
+#         - NEW: Three-tier configuration priority: Managed JSON > Local JSON > Script Defaults
+#         - ENHANCED: All User Configuration Section settings can now be controlled via JSON
+#         - ENHANCED: Instant settings updates via Jamf without redeploying script
+#         - ENHANCED: Per-department configuration support with different JSON configs
+#         - BACKWARDS COMPATIBLE: Falls back to hardcoded defaults if no JSON present
+#         - DOCUMENTATION: Complete JSON config examples and Jamf deployment guides
+#         - JAMF READY: Deploy JSON via Configuration Profile Files and Processes payload
 # v1.7.2 - CRITICAL FIX: Fixed version detection to filter by INSTALLER_OS major version
 #         - FIXED: get_available_macos_version() now uses --os parameter with erase-install --list
 #         - FIXED: SOFA fallback now searches for matching major version instead of using latest
@@ -162,7 +173,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.7.2"              # Current version of this script
+SCRIPT_VERSION="2.0.0"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -271,6 +282,193 @@ ABORT_HEIGHT=250                         # Dialog height in pixels
 ABORT_WIDTH=750                          # Dialog width in pixels
 ABORT_ICON="SF=exclamationmark.triangle" # Icon for error dialog
 #
+########################################################################################################################################################################
+#
+# ========================================
+# JSON Configuration Loading (v2.0)
+# ========================================
+#
+# This function loads configuration from JSON files with fallback to script defaults
+# Priority: Managed JSON (Jamf) > Local JSON > Script defaults
+#
+# JSON file locations:
+#   - /Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json (Jamf deployed)
+#   - /Library/Preferences/com.macjediwizard.eraseinstall.config.json (local)
+#
+
+#######################################
+# Load configuration from JSON file with fallback to defaults
+# Globals:
+#   All configuration variables from User Configuration Section
+# Arguments:
+#   None
+# Returns:
+#   0 if JSON loaded successfully, 1 if using script defaults
+#######################################
+load_json_config() {
+    local managed_json="/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json"
+    local local_json="/Library/Preferences/com.macjediwizard.eraseinstall.config.json"
+    local config_file=""
+    local config_source="script defaults"
+    local json_loaded=false
+
+    # Check for managed configuration (Jamf deployed) - highest priority
+    if [ -f "$managed_json" ]; then
+        config_file="$managed_json"
+        config_source="managed configuration (Jamf)"
+        json_loaded=true
+        echo "[CONFIG] Found managed JSON configuration: $managed_json" >&2
+    # Check for local configuration - medium priority
+    elif [ -f "$local_json" ]; then
+        config_file="$local_json"
+        config_source="local configuration"
+        json_loaded=true
+        echo "[CONFIG] Found local JSON configuration: $local_json" >&2
+    else
+        echo "[CONFIG] No JSON configuration found, using script defaults from User Configuration Section" >&2
+        return 1
+    fi
+
+    # Validate JSON syntax before attempting to read
+    if ! plutil -lint "$config_file" > /dev/null 2>&1; then
+        echo "[CONFIG] ERROR: JSON syntax invalid in $config_file - falling back to script defaults" >&2
+        return 1
+    fi
+
+    echo "[CONFIG] JSON syntax validated successfully" >&2
+
+    # Helper function to read JSON value with plutil
+    read_json() {
+        local json_path="$1"
+        local default_value="$2"
+        local value=""
+
+        # Use plutil to extract value (native macOS tool, no dependencies)
+        value=$(plutil -extract "$json_path" raw "$config_file" 2>/dev/null || echo "")
+
+        # If extraction failed or empty, use default
+        if [ -z "$value" ]; then
+            echo "$default_value"
+        else
+            echo "$value"
+        fi
+    }
+
+    # Load Core Settings
+    SCRIPT_VERSION=$(read_json "core_settings.SCRIPT_VERSION" "2.0.0")
+    INSTALLER_OS=$(read_json "core_settings.INSTALLER_OS" "15")
+    MAX_DEFERS=$(read_json "core_settings.MAX_DEFERS" "3")
+    FORCE_TIMEOUT_SECONDS=$(read_json "core_settings.FORCE_TIMEOUT_SECONDS" "259200")
+
+    # Load File Paths
+    PLIST=$(read_json "file_paths.PLIST" "/Library/Preferences/com.macjediwizard.eraseinstall.plist")
+    SCRIPT_PATH=$(read_json "file_paths.SCRIPT_PATH" "/Library/Management/erase-install/erase-install.sh")
+    DIALOG_BIN=$(read_json "file_paths.DIALOG_BIN" "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog")
+    LAUNCHDAEMON_LABEL=$(read_json "file_paths.LAUNCHDAEMON_LABEL" "com.macjediwizard.eraseinstall.schedule")
+    LAUNCHDAEMON_PATH=$(read_json "file_paths.LAUNCHDAEMON_PATH" "/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist")
+
+    # Fallback for DIALOG_BIN if primary doesn't exist
+    [ ! -x "$DIALOG_BIN" ] && DIALOG_BIN=$(read_json "file_paths.DIALOG_BIN_FALLBACK" "/usr/local/bin/dialog")
+
+    # Load Feature Toggles
+    TEST_MODE=$(read_json "feature_toggles.TEST_MODE" "false")
+    PREVENT_ALL_REBOOTS=$(read_json "feature_toggles.PREVENT_ALL_REBOOTS" "false")
+    SKIP_OS_VERSION_CHECK=$(read_json "feature_toggles.SKIP_OS_VERSION_CHECK" "false")
+    AUTO_INSTALL_DEPENDENCIES=$(read_json "feature_toggles.AUTO_INSTALL_DEPENDENCIES" "true")
+    DEBUG_MODE=$(read_json "feature_toggles.DEBUG_MODE" "false")
+
+    # Load Logging Configuration
+    MAX_LOG_SIZE_MB=$(read_json "logging.MAX_LOG_SIZE_MB" "10")
+    MAX_LOG_FILES=$(read_json "logging.MAX_LOG_FILES" "5")
+
+    # Load Main Dialog Settings
+    DIALOG_TITLE=$(read_json "main_dialog.DIALOG_TITLE" "macOS Upgrade Required")
+    DIALOG_TITLE_TEST_MODE=$(read_json "main_dialog.DIALOG_TITLE_TEST_MODE" "$DIALOG_TITLE\n                (TEST MODE)")
+    DIALOG_MESSAGE=$(read_json "main_dialog.DIALOG_MESSAGE" "Please install macOS ${INSTALLER_OS}. Select an action:")
+    DIALOG_ICON=$(read_json "main_dialog.DIALOG_ICON" "SF=gear,weight=bold,size=128")
+    DIALOG_POSITION=$(read_json "main_dialog.DIALOG_POSITION" "topright")
+    DIALOG_HEIGHT=$(read_json "main_dialog.DIALOG_HEIGHT" "250")
+    DIALOG_WIDTH=$(read_json "main_dialog.DIALOG_WIDTH" "650")
+    DIALOG_MESSAGEFONT=$(read_json "main_dialog.DIALOG_MESSAGEFONT" "size=16")
+    DIALOG_INSTALL_NOW_TEXT=$(read_json "main_dialog.DIALOG_INSTALL_NOW_TEXT" "Install Now")
+    DIALOG_SCHEDULE_TODAY_TEXT=$(read_json "main_dialog.DIALOG_SCHEDULE_TODAY_TEXT" "Schedule Today")
+    DIALOG_DEFER_TEXT=$(read_json "main_dialog.DIALOG_DEFER_TEXT" "Defer 24 Hours")
+    DIALOG_DEFER_TEXT_TEST_MODE=$(read_json "main_dialog.DIALOG_DEFER_TEXT_TEST_MODE" "Defer 5 Minutes   (TEST MODE)")
+    DIALOG_CONFIRM_TEXT=$(read_json "main_dialog.DIALOG_CONFIRM_TEXT" "Confirm")
+
+    # Load Pre-installation Dialog Settings
+    PREINSTALL_TITLE=$(read_json "preinstall_dialog.PREINSTALL_TITLE" "macOS Upgrade Starting")
+    PREINSTALL_TITLE_TEST_MODE=$(read_json "preinstall_dialog.PREINSTALL_TITLE_TEST_MODE" "$PREINSTALL_TITLE\n                (TEST MODE)")
+    PREINSTALL_MESSAGE=$(read_json "preinstall_dialog.PREINSTALL_MESSAGE" "Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds, or click Continue to begin now.")
+    PREINSTALL_PROGRESS_TEXT_MESSAGE=$(read_json "preinstall_dialog.PREINSTALL_PROGRESS_TEXT_MESSAGE" "Installation will begin in 60 seconds...")
+    PREINSTALL_CONTINUE_TEXT=$(read_json "preinstall_dialog.PREINSTALL_CONTINUE_TEXT" "Continue Now")
+    PREINSTALL_COUNTDOWN=$(read_json "preinstall_dialog.PREINSTALL_COUNTDOWN" "60")
+    PREINSTALL_HEIGHT=$(read_json "preinstall_dialog.PREINSTALL_HEIGHT" "350")
+    PREINSTALL_WIDTH=$(read_json "preinstall_dialog.PREINSTALL_WIDTH" "650")
+    PREINSTALL_DIALOG_MESSAGEFONT=$(read_json "preinstall_dialog.PREINSTALL_DIALOG_MESSAGEFONT" "size=16")
+
+    # Load Scheduled Dialog Settings
+    SCHEDULED_TITLE=$(read_json "scheduled_dialog.SCHEDULED_TITLE" "macOS Upgrade Scheduled")
+    SCHEDULED_TITLE_TEST_MODE=$(read_json "scheduled_dialog.SCHEDULED_TITLE_TEST_MODE" "$SCHEDULED_TITLE\n                (TEST MODE)")
+    SCHEDULED_MESSAGE=$(read_json "scheduled_dialog.SCHEDULED_MESSAGE" "Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds,\n\n or click Continue to begin now.")
+    SCHEDULED_PROGRESS_TEXT_MESSAGE=$(read_json "scheduled_dialog.SCHEDULED_PROGRESS_TEXT_MESSAGE" "Installation will begin in 60 seconds.....")
+    SCHEDULED_CONTINUE_TEXT=$(read_json "scheduled_dialog.SCHEDULED_CONTINUE_TEXT" "Continue Now")
+    SCHEDULED_COUNTDOWN=$(read_json "scheduled_dialog.SCHEDULED_COUNTDOWN" "60")
+    SCHEDULED_HEIGHT=$(read_json "scheduled_dialog.SCHEDULED_HEIGHT" "250")
+    SCHEDULED_WIDTH=$(read_json "scheduled_dialog.SCHEDULED_WIDTH" "650")
+    SCHEDULED_CONTINUE_HEIGHT=$(read_json "scheduled_dialog.SCHEDULED_CONTINUE_HEIGHT" "350")
+    SCHEDULED_CONTINUE_WIDTH=$(read_json "scheduled_dialog.SCHEDULED_CONTINUE_WIDTH" "750")
+    SCHEDULED_DIALOG_MESSAGEFONT=$(read_json "scheduled_dialog.SCHEDULED_DIALOG_MESSAGEFONT" "size=16")
+
+    # Load Error Dialog Settings
+    ERROR_DIALOG_TITLE=$(read_json "error_dialog.ERROR_DIALOG_TITLE" "Invalid Time")
+    ERROR_DIALOG_MESSAGE=$(read_json "error_dialog.ERROR_DIALOG_MESSAGE" "The selected time is invalid.\nPlease select a valid time (00:00-23:59).")
+    ERROR_DIALOG_ICON=$(read_json "error_dialog.ERROR_DIALOG_ICON" "SF=exclamationmark.triangle")
+    ERROR_DIALOG_HEIGHT=$(read_json "error_dialog.ERROR_DIALOG_HEIGHT" "350")
+    ERROR_DIALOG_WIDTH=$(read_json "error_dialog.ERROR_DIALOG_WIDTH" "650")
+    ERROR_CONTINUE_TEXT=$(read_json "error_dialog.ERROR_CONTINUE_TEXT" "OK")
+
+    # Load erase-install Options
+    REBOOT_DELAY=$(read_json "erase_install_options.REBOOT_DELAY" "60")
+    REINSTALL=$(read_json "erase_install_options.REINSTALL" "true")
+    NO_FS=$(read_json "erase_install_options.NO_FS" "true")
+    CHECK_POWER=$(read_json "erase_install_options.CHECK_POWER" "true")
+    POWER_WAIT_LIMIT=$(read_json "erase_install_options.POWER_WAIT_LIMIT" "300")
+    MIN_DRIVE_SPACE=$(read_json "erase_install_options.MIN_DRIVE_SPACE" "50")
+    CLEANUP_AFTER_USE=$(read_json "erase_install_options.CLEANUP_AFTER_USE" "true")
+
+    # Load Authentication Notice Settings
+    SHOW_AUTH_NOTICE=$(read_json "auth_notice.SHOW_AUTH_NOTICE" "true")
+    AUTH_NOTICE_TITLE=$(read_json "auth_notice.AUTH_NOTICE_TITLE" "Admin Access Required")
+    AUTH_NOTICE_TITLE_TEST_MODE=$(read_json "auth_notice.AUTH_NOTICE_TITLE_TEST_MODE" "$AUTH_NOTICE_TITLE\n            (TEST MODE)")
+    AUTH_NOTICE_MESSAGE=$(read_json "auth_notice.AUTH_NOTICE_MESSAGE" "You will be prompted for admin credentials to complete the macOS upgrade.\n\nIf you do not have admin access, please use Jamf Connect or Self Service to elevate your permissions before continuing.")
+    AUTH_NOTICE_BUTTON=$(read_json "auth_notice.AUTH_NOTICE_BUTTON" "I'm Ready to Continue")
+    AUTH_NOTICE_TIMEOUT=$(read_json "auth_notice.AUTH_NOTICE_TIMEOUT" "0")
+    AUTH_NOTICE_ICON=$(read_json "auth_notice.AUTH_NOTICE_ICON" "SF=lock.shield")
+    AUTH_NOTICE_HEIGHT=$(read_json "auth_notice.AUTH_NOTICE_HEIGHT" "300")
+    AUTH_NOTICE_WIDTH=$(read_json "auth_notice.AUTH_NOTICE_WIDTH" "750")
+
+    # Load Abort Button Settings
+    ENABLE_ABORT_BUTTON=$(read_json "abort_button.ENABLE_ABORT_BUTTON" "true")
+    ABORT_BUTTON_TEXT=$(read_json "abort_button.ABORT_BUTTON_TEXT" "Abort (Emergency)")
+    ABORT_DEFER_MINUTES=$(read_json "abort_button.ABORT_DEFER_MINUTES" "5")
+    MAX_ABORTS=$(read_json "abort_button.MAX_ABORTS" "3")
+    ABORT_COUNTDOWN=$(read_json "abort_button.ABORT_COUNTDOWN" "15")
+    ABORT_HEIGHT=$(read_json "abort_button.ABORT_HEIGHT" "250")
+    ABORT_WIDTH=$(read_json "abort_button.ABORT_WIDTH" "750")
+    ABORT_ICON=$(read_json "abort_button.ABORT_ICON" "SF=exclamationmark.triangle")
+
+    # Log configuration summary
+    echo "[CONFIG] Configuration loaded from: $config_source" >&2
+    echo "[CONFIG] Target macOS Version: ${INSTALLER_OS}" >&2
+    echo "[CONFIG] Max Deferrals: ${MAX_DEFERS}" >&2
+    echo "[CONFIG] Max Aborts: ${MAX_ABORTS}" >&2
+    echo "[CONFIG] Test Mode: ${TEST_MODE}" >&2
+    echo "[CONFIG] Debug Mode: ${DEBUG_MODE}" >&2
+
+    return 0
+}
+
 ########################################################################################################################################################################
 #
 # ---------- Very Early Abort Detection ----------
@@ -6552,7 +6750,12 @@ is_running_from_relaunch_daemon() {
 
 # Main script execution for non-scheduled mode
 init_logging
+
+# Load JSON configuration (v2.0) - overrides User Configuration Section if JSON exists
+load_json_config
+
 log_info "Starting erase-install wrapper script v${SCRIPT_VERSION}"
+log_info "Configuration source: $([ -f "/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Managed JSON (Jamf)" || [ -f "/Library/Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Local JSON" || echo "Script Defaults")"
 log_system_info
 
 # Detect if running from abort daemon
