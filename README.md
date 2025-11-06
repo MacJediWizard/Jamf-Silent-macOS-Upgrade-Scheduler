@@ -172,7 +172,7 @@ At the top of the script, these options are configurable:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SCRIPT_VERSION` | Current version of this script | `1.7.1` |
+| `SCRIPT_VERSION` | Current version of this script | `1.7.2` |
 | `INSTALLER_OS` | Target macOS version to upgrade to | `15` |
 | `MAX_DEFERS` | Maximum allowed 24-hour deferrals | `3` |
 | `MAX_ABORTS` | Maximum allowed emergency aborts | `3` |
@@ -254,6 +254,15 @@ These testing features allow you to test the complete workflow without waiting f
 ---
 
 ## Recent Updates
+
+### v1.7.2 (2025-11-05)
+
+- 🔥 **CRITICAL FIX**: Fixed `get_available_macos_version()` to filter by INSTALLER_OS major version
+- 🐛 **Fixed**: Function was calling erase-install --list without --os parameter, returning macOS 26.x
+- 🐛 **Fixed**: SOFA fallback now searches for matching major version instead of using latest
+- ✅ **Impact**: targetOSVersion now correctly set to latest macOS 15.x instead of 26.x
+- ✅ **Impact**: Version checks now compare against correct target version
+- ✅ **Impact**: Eliminates false "OS not at target" detections
 
 ### v1.7.1 (2025-11-05)
 
