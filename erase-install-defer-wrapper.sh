@@ -6819,6 +6819,41 @@ for arg in "$@"; do
     --test-os-check)
       SKIP_OS_VERSION_CHECK=true
       ;;
+    --version)
+      echo "erase-install-defer-wrapper v${SCRIPT_VERSION}"
+      echo "JSON Configuration Management for macOS Upgrade Automation"
+      echo ""
+      echo "GitHub: https://github.com/MacJediWizard/Jamf-Silent-macOS-Upgrade-Scheduler"
+      echo "Made with ❤️ by MacJediWizard Consulting, Inc."
+      exit 0
+      ;;
+    --help|-h)
+      echo "erase-install-defer-wrapper v${SCRIPT_VERSION}"
+      echo "JSON Configuration Management for macOS Upgrade Automation"
+      echo ""
+      echo "Usage: $0 [OPTIONS]"
+      echo ""
+      echo "Options:"
+      echo "  --show-config              Display current configuration and exit"
+      echo "  --config=/path/to/file     Use custom JSON configuration file"
+      echo "  --test-os-check            Skip OS version check (for testing)"
+      echo "  --version                  Display version information and exit"
+      echo "  --help, -h                 Display this help message and exit"
+      echo ""
+      echo "Configuration Priority (Highest to Lowest):"
+      echo "  1. Custom JSON (--config parameter)"
+      echo "  2. Managed JSON (/Library/Managed Preferences/...)"
+      echo "  3. Local JSON (/Library/Preferences/...)"
+      echo "  4. Script Defaults"
+      echo ""
+      echo "Examples:"
+      echo "  $0 --show-config"
+      echo "  $0 --config=/tmp/test-config.json"
+      echo "  $0 --config=/tmp/qa.json --test-os-check"
+      echo ""
+      echo "Documentation: https://github.com/MacJediWizard/Jamf-Silent-macOS-Upgrade-Scheduler"
+      exit 0
+      ;;
   esac
 done
 
