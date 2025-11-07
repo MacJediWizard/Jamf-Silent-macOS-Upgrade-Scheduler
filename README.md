@@ -279,6 +279,8 @@ The recommended way to configure the wrapper is using **JSON configuration files
 - ⚡ Update settings instantly (changes apply on next policy run)
 - 🏢 Deploy different configs to different departments
 - 📋 Use human-readable JSON format
+- 🔍 Debug with `--show-config` parameter
+- 🎯 Test with custom configs using `--config` parameter
 
 **Quick Start:**
 
@@ -286,6 +288,24 @@ The recommended way to configure the wrapper is using **JSON configuration files
 2. Edit settings as needed
 3. Deploy via Jamf Configuration Profile (Files and Processes payload)
 4. Place at: `/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json`
+
+**Configuration Priority (Highest to Lowest):**
+1. Custom JSON (`--config=/path/to/file.json` parameter)
+2. Managed JSON (`/Library/Managed Preferences/...`)
+3. Local JSON (`/Library/Preferences/...`)
+4. Script Defaults (User Configuration Section)
+
+**Command-Line Parameters:**
+```bash
+# Display current configuration
+./erase-install-defer-wrapper.sh --show-config
+
+# Use custom config file
+./erase-install-defer-wrapper.sh --config=/tmp/test-config.json
+
+# Bypass OS version check (testing)
+./erase-install-defer-wrapper.sh --test-os-check
+```
 
 **Documentation:**
 - **Quick Start**: See `JAMF_CONFIG_PROFILE_QUICK_START.md`
