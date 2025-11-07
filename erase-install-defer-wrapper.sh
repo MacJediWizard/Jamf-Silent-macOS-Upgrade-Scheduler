@@ -35,10 +35,15 @@
 #         - NEW: JSON configuration file support for centralized settings management
 #         - NEW: Managed preferences support for Jamf Configuration Profile deployment
 #         - NEW: load_json_config() function loads settings from JSON with fallback to script defaults
-#         - NEW: Three-tier configuration priority: Managed JSON > Local JSON > Script Defaults
+#         - NEW: Four-tier configuration priority: Custom (--config) > Managed JSON > Local JSON > Script Defaults
+#         - NEW: --show-config command to display current configuration without running script
+#         - NEW: --config=/path/to/file.json parameter to specify custom JSON config location
+#         - NEW: Configuration validation with warnings for invalid values
+#         - NEW: Enhanced configuration logging showing all loaded settings
 #         - ENHANCED: All User Configuration Section settings can now be controlled via JSON
 #         - ENHANCED: Instant settings updates via Jamf without redeploying script
 #         - ENHANCED: Per-department configuration support with different JSON configs
+#         - ENHANCED: Command-line parameter processing for custom configs and testing
 #         - BACKWARDS COMPATIBLE: Falls back to hardcoded defaults if no JSON present
 #         - DOCUMENTATION: Complete JSON config examples and Jamf deployment guides
 #         - JAMF READY: Deploy JSON via Configuration Profile Files and Processes payload
@@ -316,19 +321,32 @@ load_json_config() {
     local config_source="script defaults"
     local json_loaded=false
 
-    # Check for managed configuration (Jamf deployed) - highest priority
-    if [ -f "$managed_json" ]; then
+    # Check for custom config path (command-line override) - highest priority
+    if [[ -n "$CUSTOM_CONFIG_PATH" ]]; then
+        if [ -f "$CUSTOM_CONFIG_PATH" ]; then
+            config_file="$CUSTOM_CONFIG_PATH"
+            config_source="custom configuration (--config parameter)"
+            json_loaded=true
+            echo "[CONFIG] Using custom JSON configuration: $CUSTOM_CONFIG_PATH" >&2
+        else
+            echo "[CONFIG] ERROR: Custom config file not found: $CUSTOM_CONFIG_PATH" >&2
+            echo "[CONFIG] Falling back to standard configuration search" >&2
+        fi
+    fi
+
+    # Check for managed configuration (Jamf deployed) - second priority
+    if [[ -z "$config_file" ]] && [ -f "$managed_json" ]; then
         config_file="$managed_json"
         config_source="managed configuration (Jamf)"
         json_loaded=true
         echo "[CONFIG] Found managed JSON configuration: $managed_json" >&2
-    # Check for local configuration - medium priority
-    elif [ -f "$local_json" ]; then
+    # Check for local configuration - third priority
+    elif [[ -z "$config_file" ]] && [ -f "$local_json" ]; then
         config_file="$local_json"
         config_source="local configuration"
         json_loaded=true
         echo "[CONFIG] Found local JSON configuration: $local_json" >&2
-    else
+    elif [[ -z "$config_file" ]]; then
         echo "[CONFIG] No JSON configuration found, using script defaults from User Configuration Section" >&2
         return 1
     fi
@@ -462,13 +480,37 @@ load_json_config() {
     ABORT_WIDTH=$(read_json "abort_button.ABORT_WIDTH" "750")
     ABORT_ICON=$(read_json "abort_button.ABORT_ICON" "SF=exclamationmark.triangle")
 
+    # Validate critical settings
+    if [[ ! "$INSTALLER_OS" =~ ^[0-9]+$ ]]; then
+        echo "[CONFIG] WARNING: INSTALLER_OS ($INSTALLER_OS) is not a valid number, using default: 15" >&2
+        INSTALLER_OS="15"
+    fi
+
+    if [[ ! "$MAX_DEFERS" =~ ^[0-9]+$ ]] || [[ "$MAX_DEFERS" -lt 0 ]]; then
+        echo "[CONFIG] WARNING: MAX_DEFERS ($MAX_DEFERS) is not valid, using default: 3" >&2
+        MAX_DEFERS=3
+    fi
+
+    if [[ ! "$MAX_ABORTS" =~ ^[0-9]+$ ]] || [[ "$MAX_ABORTS" -lt 0 ]]; then
+        echo "[CONFIG] WARNING: MAX_ABORTS ($MAX_ABORTS) is not valid, using default: 3" >&2
+        MAX_ABORTS=3
+    fi
+
     # Log configuration summary
+    echo "[CONFIG] ========================================" >&2
     echo "[CONFIG] Configuration loaded from: $config_source" >&2
-    echo "[CONFIG] Target macOS Version: ${INSTALLER_OS}" >&2
-    echo "[CONFIG] Max Deferrals: ${MAX_DEFERS}" >&2
-    echo "[CONFIG] Max Aborts: ${MAX_ABORTS}" >&2
-    echo "[CONFIG] Test Mode: ${TEST_MODE}" >&2
-    echo "[CONFIG] Debug Mode: ${DEBUG_MODE}" >&2
+    echo "[CONFIG] ========================================" >&2
+    echo "[CONFIG] Core Settings:" >&2
+    echo "[CONFIG]   Target macOS Version: ${INSTALLER_OS}" >&2
+    echo "[CONFIG]   Max Deferrals: ${MAX_DEFERS}" >&2
+    echo "[CONFIG]   Max Aborts: ${MAX_ABORTS}" >&2
+    echo "[CONFIG]   Force Timeout: ${FORCE_TIMEOUT_SECONDS}s ($(($FORCE_TIMEOUT_SECONDS / 3600))h)" >&2
+    echo "[CONFIG] Feature Toggles:" >&2
+    echo "[CONFIG]   Test Mode: ${TEST_MODE}" >&2
+    echo "[CONFIG]   Debug Mode: ${DEBUG_MODE}" >&2
+    echo "[CONFIG]   Skip OS Check: ${SKIP_OS_VERSION_CHECK}" >&2
+    echo "[CONFIG]   Prevent Reboots: ${PREVENT_ALL_REBOOTS}" >&2
+    echo "[CONFIG] ========================================" >&2
 
     return 0
 }
@@ -6758,6 +6800,28 @@ is_running_from_relaunch_daemon() {
   return 1
 }
 
+# ========================================
+# Command-line Argument Processing (v2.0)
+# ========================================
+
+# Parse command-line arguments before initialization
+CUSTOM_CONFIG_PATH=""
+SHOW_CONFIG_ONLY=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --config=*)
+      CUSTOM_CONFIG_PATH="${arg#*=}"
+      ;;
+    --show-config)
+      SHOW_CONFIG_ONLY=true
+      ;;
+    --test-os-check)
+      SKIP_OS_VERSION_CHECK=true
+      ;;
+  esac
+done
+
 # Main script execution for non-scheduled mode
 init_logging
 
@@ -6766,6 +6830,46 @@ load_json_config
 
 log_info "Starting erase-install wrapper script v${SCRIPT_VERSION}"
 log_info "Configuration source: $([ -f "/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Managed JSON (Jamf)" || [ -f "/Library/Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Local JSON" || echo "Script Defaults")"
+
+# Handle --show-config command
+if [[ "$SHOW_CONFIG_ONLY" == "true" ]]; then
+  echo ""
+  echo "=== Current Configuration ==="
+  echo "Configuration Source: $([ -f "/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Managed JSON (Jamf)" || [ -f "/Library/Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Local JSON" || echo "Script Defaults")"
+  echo ""
+  echo "Core Settings:"
+  echo "  SCRIPT_VERSION: ${SCRIPT_VERSION}"
+  echo "  INSTALLER_OS: ${INSTALLER_OS}"
+  echo "  MAX_DEFERS: ${MAX_DEFERS}"
+  echo "  MAX_ABORTS: ${MAX_ABORTS}"
+  echo "  FORCE_TIMEOUT_SECONDS: ${FORCE_TIMEOUT_SECONDS}"
+  echo ""
+  echo "Feature Toggles:"
+  echo "  TEST_MODE: ${TEST_MODE}"
+  echo "  PREVENT_ALL_REBOOTS: ${PREVENT_ALL_REBOOTS}"
+  echo "  SKIP_OS_VERSION_CHECK: ${SKIP_OS_VERSION_CHECK}"
+  echo "  AUTO_INSTALL_DEPENDENCIES: ${AUTO_INSTALL_DEPENDENCIES}"
+  echo "  DEBUG_MODE: ${DEBUG_MODE}"
+  echo ""
+  echo "File Paths:"
+  echo "  SCRIPT_PATH: ${SCRIPT_PATH}"
+  echo "  DIALOG_BIN: ${DIALOG_BIN}"
+  echo "  PLIST: ${PLIST}"
+  echo ""
+  echo "Dialog Settings:"
+  echo "  DIALOG_TITLE: ${DIALOG_TITLE}"
+  echo "  DIALOG_POSITION: ${DIALOG_POSITION}"
+  echo "  DIALOG_ICON: ${DIALOG_ICON}"
+  echo ""
+  echo "erase-install Options:"
+  echo "  REINSTALL: ${REINSTALL}"
+  echo "  CHECK_POWER: ${CHECK_POWER}"
+  echo "  POWER_WAIT_LIMIT: ${POWER_WAIT_LIMIT}"
+  echo "  MIN_DRIVE_SPACE: ${MIN_DRIVE_SPACE}"
+  echo ""
+  exit 0
+fi
+
 log_system_info
 
 # Detect if running from abort daemon
