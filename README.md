@@ -297,6 +297,12 @@ The recommended way to configure the wrapper is using **JSON configuration files
 
 **Command-Line Parameters:**
 ```bash
+# Display version information
+./erase-install-defer-wrapper.sh --version
+
+# Display help and usage
+./erase-install-defer-wrapper.sh --help
+
 # Display current configuration
 ./erase-install-defer-wrapper.sh --show-config
 
