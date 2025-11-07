@@ -1,0 +1,54 @@
+{
+  "_comment": "Production Configuration - Standard Enterprise Deployment",
+  "_description": "Balanced settings for production deployment with 3 deferrals and 3-day timeout",
+
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 3,
+    "MAX_ABORTS": 3,
+    "FORCE_TIMEOUT_SECONDS": 259200
+  },
+
+  "feature_toggles": {
+    "TEST_MODE": false,
+    "DEBUG_MODE": false,
+    "PREVENT_ALL_REBOOTS": false,
+    "SKIP_OS_VERSION_CHECK": false,
+    "AUTO_INSTALL_DEPENDENCIES": true
+  },
+
+  "main_dialog": {
+    "DIALOG_TITLE": "macOS Sequoia Upgrade Required",
+    "DIALOG_MESSAGE": "IT requires all Macs to upgrade to macOS 15. Please select an action:",
+    "DIALOG_POSITION": "topright",
+    "DIALOG_HEIGHT": "250",
+    "DIALOG_WIDTH": "650"
+  },
+
+  "auth_notice": {
+    "SHOW_AUTH_NOTICE": true,
+    "AUTH_NOTICE_TITLE": "Admin Access Required",
+    "AUTH_NOTICE_MESSAGE": "You will be prompted for admin credentials to complete the macOS upgrade.\n\nIf you do not have admin access, please use Jamf Connect or Self Service to elevate your permissions before continuing.",
+    "AUTH_NOTICE_TIMEOUT": 0
+  },
+
+  "abort_button": {
+    "ENABLE_ABORT_BUTTON": true,
+    "ABORT_BUTTON_TEXT": "Abort (Emergency)",
+    "MAX_ABORTS": 3
+  },
+
+  "erase_install_options": {
+    "REBOOT_DELAY": 60,
+    "REINSTALL": true,
+    "NO_FS": true,
+    "CHECK_POWER": true,
+    "MIN_DRIVE_SPACE": 50,
+    "CLEANUP_AFTER_USE": true
+  },
+
+  "logging": {
+    "MAX_LOG_SIZE_MB": 10,
+    "MAX_LOG_FILES": 5
+  }
+}

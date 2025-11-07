@@ -1,0 +1,55 @@
+{
+  "_comment": "Flexible Configuration - Standard Users",
+  "_description": "Extended deferrals and timeout for standard users with flexible schedules",
+
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 5,
+    "MAX_ABORTS": 5,
+    "FORCE_TIMEOUT_SECONDS": 604800
+  },
+
+  "feature_toggles": {
+    "TEST_MODE": false,
+    "DEBUG_MODE": false,
+    "PREVENT_ALL_REBOOTS": false,
+    "SKIP_OS_VERSION_CHECK": false,
+    "AUTO_INSTALL_DEPENDENCIES": true
+  },
+
+  "main_dialog": {
+    "DIALOG_TITLE": "macOS Upgrade Available",
+    "DIALOG_MESSAGE": "A macOS upgrade is available. You have 5 deferrals and 7 days to complete this upgrade.\n\nPlease select an action:",
+    "DIALOG_POSITION": "topright",
+    "DIALOG_HEIGHT": "280",
+    "DIALOG_WIDTH": "650"
+  },
+
+  "auth_notice": {
+    "SHOW_AUTH_NOTICE": true,
+    "AUTH_NOTICE_TITLE": "Admin Access Required",
+    "AUTH_NOTICE_MESSAGE": "You will be prompted for admin credentials to complete the macOS upgrade.\n\nIf you do not have admin access, please contact IT or use Self Service to elevate your permissions.",
+    "AUTH_NOTICE_TIMEOUT": 0
+  },
+
+  "abort_button": {
+    "ENABLE_ABORT_BUTTON": true,
+    "ABORT_BUTTON_TEXT": "Abort (Emergency)",
+    "MAX_ABORTS": 5,
+    "ABORT_DEFER_MINUTES": 5
+  },
+
+  "erase_install_options": {
+    "REBOOT_DELAY": 60,
+    "REINSTALL": true,
+    "NO_FS": true,
+    "CHECK_POWER": true,
+    "MIN_DRIVE_SPACE": 50,
+    "CLEANUP_AFTER_USE": true
+  },
+
+  "logging": {
+    "MAX_LOG_SIZE_MB": 10,
+    "MAX_LOG_FILES": 5
+  }
+}
