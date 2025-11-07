@@ -1,49 +1,66 @@
-# Jamf Configuration Profile - Quick Start Guide
+# Jamf JSON Configuration - Quick Start Guide
 
 ## 5-Minute Setup for v2.0
 
-This guide shows the fastest way to deploy Configuration Profile management for the macOS Upgrade Wrapper.
+This guide shows the fastest way to deploy JSON-based configuration management for the macOS Upgrade Wrapper using Jamf Pro.
 
 ---
 
-## Step 1: Upload Configuration Profile to Jamf (2 minutes)
+## Step 1: Deploy JSON Configuration via Jamf (2 minutes)
 
-### Method A: Upload Existing Plist (Recommended)
+### Method A: Files and Processes Payload (Recommended)
 
 1. Go to **Computers → Configuration Profiles → New**
 2. **General Tab:**
-   - Display Name: `macOS Upgrade Wrapper Configuration`
+   - Display Name: `macOS Upgrade Wrapper JSON Configuration`
    - Distribution Method: `Install Automatically`
    - Level: `Computer Level`
 
-3. **Application & Custom Settings:**
+3. **Files and Processes:**
    - Click **Configure**
-   - Click **Upload** (paperclip icon)
-   - Select: `com.macjediwizard.eraseinstall.config.example.plist`
-   - Click **Upload**
+   - Click **Add** under "Files to Deploy"
+   - Upload: `com.macjediwizard.eraseinstall.config.json`
+   - Destination Path: `/Library/Managed Preferences/`
+   - File Permissions: `644`
+   - File Owner: `root`
+   - File Group: `wheel`
 
 4. **Scope Tab:**
    - Target: `All Computers` (or your specific group)
 
 5. Click **Save**
 
-### Method B: Manual Entry (If you prefer)
+### Method B: Script Deployment (Alternative)
 
-1. **Application & Custom Settings:**
-   - Click **Configure**
-   - Preference Domain: `com.macjediwizard.eraseinstall.config`
-   - Click **Add** for each setting:
+If you prefer to manage JSON via a Jamf script:
 
-   | Key | Type | Value |
-   |-----|------|-------|
-   | INSTALLER_OS | String | 15 |
-   | MAX_DEFERS | Integer | 3 |
-   | MAX_ABORTS | Integer | 3 |
-   | TEST_MODE | Boolean | false |
-   | DEBUG_MODE | Boolean | false |
-   | DIALOG_TITLE | String | macOS Upgrade Required |
+```bash
+#!/bin/bash
+# Deploy JSON Configuration to Managed Preferences
 
-   *(See example plist for complete settings list)*
+cat > /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json <<'EOF'
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 3,
+    "FORCE_TIMEOUT_SECONDS": 259200
+  },
+  "feature_toggles": {
+    "TEST_MODE": false,
+    "DEBUG_MODE": false
+  },
+  "main_dialog": {
+    "DIALOG_TITLE": "macOS Upgrade Required"
+  }
+}
+EOF
+
+# Set permissions
+chmod 644 /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
+chown root:wheel /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
+
+echo "✅ JSON configuration deployed"
+```
 
 ---
 
@@ -52,14 +69,20 @@ This guide shows the fastest way to deploy Configuration Profile management for 
 On any Mac in scope:
 
 ```bash
-# Check if profile installed
-sudo profiles list | grep macjediwizard
+# Check if JSON file exists
+ls -la /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
 
-# Read settings
-sudo defaults read /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config
+# Validate JSON syntax
+plutil -lint /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
 
-# Test specific setting
-sudo defaults read /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config INSTALLER_OS
+# Read specific setting
+plutil -extract core_settings.INSTALLER_OS raw /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
+
+# View entire configuration
+plutil -p /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
+
+# Use wrapper's --show-config parameter (BEST METHOD)
+sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --show-config
 ```
 
 **Expected Output:**
@@ -107,81 +130,74 @@ fi
 
 ### Configuration 1: Standard Deployment (Most Organizations)
 
-```xml
-<key>INSTALLER_OS</key>
-<string>15</string>
-
-<key>MAX_DEFERS</key>
-<integer>3</integer>
-
-<key>MAX_ABORTS</key>
-<integer>3</integer>
-
-<key>FORCE_TIMEOUT_SECONDS</key>
-<integer>259200</integer>  <!-- 3 days -->
-
-<key>TEST_MODE</key>
-<false/>
-
-<key>DEBUG_MODE</key>
-<false/>
-
-<key>SHOW_AUTH_NOTICE</key>
-<true/>
+```json
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 3,
+    "MAX_ABORTS": 3,
+    "FORCE_TIMEOUT_SECONDS": 259200
+  },
+  "feature_toggles": {
+    "TEST_MODE": false,
+    "DEBUG_MODE": false
+  },
+  "auth_notice": {
+    "SHOW_AUTH_NOTICE": true
+  }
+}
 ```
 
 ### Configuration 2: Aggressive Enforcement (IT/Security Teams)
 
-```xml
-<key>MAX_DEFERS</key>
-<integer>1</integer>
-
-<key>MAX_ABORTS</key>
-<integer>1</integer>
-
-<key>FORCE_TIMEOUT_SECONDS</key>
-<integer>86400</integer>  <!-- 1 day -->
-
-<key>DIALOG_TITLE</key>
-<string>⚠️ URGENT: Security Update Required</string>
+```json
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 1,
+    "MAX_ABORTS": 1,
+    "FORCE_TIMEOUT_SECONDS": 86400
+  },
+  "main_dialog": {
+    "DIALOG_TITLE": "⚠️ URGENT: Security Update Required"
+  }
+}
 ```
 
 ### Configuration 3: Flexible Deployment (Standard Users)
 
-```xml
-<key>MAX_DEFERS</key>
-<integer>5</integer>
-
-<key>MAX_ABORTS</key>
-<integer>5</integer>
-
-<key>FORCE_TIMEOUT_SECONDS</key>
-<integer>604800</integer>  <!-- 7 days -->
-
-<key>SHOW_AUTH_NOTICE</key>
-<true/>
-
-<key>AUTH_NOTICE_TIMEOUT</key>
-<integer>0</integer>  <!-- No timeout -->
+```json
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 5,
+    "MAX_ABORTS": 5,
+    "FORCE_TIMEOUT_SECONDS": 604800
+  },
+  "auth_notice": {
+    "SHOW_AUTH_NOTICE": true,
+    "AUTH_NOTICE_TIMEOUT": 0
+  }
+}
 ```
 
 ### Configuration 4: Testing/QA Environment
 
-```xml
-<key>TEST_MODE</key>
-<true/>
-
-<key>SKIP_OS_VERSION_CHECK</key>
-<true/>
-
-<key>DEBUG_MODE</key>
-<true/>
-
-<key>MAX_DEFERS</key>
-<integer>99</integer>
-
-<key>DIALOG_TITLE</key>
-<string>[QA TEST] macOS Upgrade</string>
+```json
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 99
+  },
+  "feature_toggles": {
+    "TEST_MODE": true,
+    "SKIP_OS_VERSION_CHECK": true,
+    "DEBUG_MODE": true
+  },
+  "main_dialog": {
+    "DIALOG_TITLE": "[QA TEST] macOS Upgrade"
+  }
+}
 ```
 
 ---
@@ -204,6 +220,67 @@ fi
 - **Profile Name:** `macOS Upgrade Config - Standard`
 - **Scope:** Smart Group "All Computers" (Exclude IT and Finance)
 - **Settings:** Standard enforcement (3 defers, 3 day timeout)
+
+---
+
+## Testing Configurations with Command-Line Parameters
+
+v2.0 includes command-line parameters for testing configurations before deploying via Jamf.
+
+### Test Custom Configuration Locally
+
+```bash
+# Create test JSON
+cat > /tmp/test-config.json <<'EOF'
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 1
+  },
+  "feature_toggles": {
+    "TEST_MODE": true,
+    "DEBUG_MODE": true
+  }
+}
+EOF
+
+# View configuration without running
+sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --config=/tmp/test-config.json --show-config
+
+# Run with test configuration
+sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --config=/tmp/test-config.json
+```
+
+### Verify Deployed Configuration
+
+```bash
+# Show what configuration is currently loaded
+sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --show-config
+```
+
+**Example Output:**
+```
+=== Current Configuration ===
+Configuration Source: managed configuration (Jamf)
+
+Core Settings:
+  INSTALLER_OS: 15
+  MAX_DEFERS: 3
+  MAX_ABORTS: 3
+  FORCE_TIMEOUT_SECONDS: 259200
+
+Feature Toggles:
+  TEST_MODE: false
+  DEBUG_MODE: false
+  SKIP_OS_VERSION_CHECK: false
+```
+
+### Skip OS Version Check for Testing
+
+```bash
+# Test workflow on lower OS version
+sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --test-os-check
+```
 
 ---
 
@@ -236,40 +313,57 @@ fi
 
 ## Troubleshooting Commands
 
-### Check Profile Status
-```bash
-# List all configuration profiles
-sudo profiles list
+### Quick Diagnostics - Use --show-config (BEST METHOD)
 
-# Show specific profile
-sudo profiles show | grep -A 20 macjediwizard
+```bash
+# Display current configuration
+sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --show-config
 ```
 
-### Check Settings
-```bash
-# View all managed settings
-sudo defaults read /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config
+This shows:
+- Configuration source (Custom/Managed/Local/Defaults)
+- All critical settings
+- Feature toggles
+- File paths
 
-# Check specific setting
-sudo defaults read /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config INSTALLER_OS
+### Check JSON File Status
+```bash
+# Check if JSON file exists
+ls -la /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
+
+# Validate JSON syntax
+plutil -lint /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
+
+# View entire JSON
+plutil -p /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
+
+# Extract specific value
+plutil -extract core_settings.INSTALLER_OS raw /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
 ```
 
-### Force Profile Update
+### Force Configuration Update
 ```bash
 # Re-run Jamf check-in
 sudo jamf policy
 
-# Or force specific policy
-sudo jamf policy -id <policy_id>
+# Check file updated
+stat /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json
 ```
 
 ### Check Wrapper Log
 ```bash
 # See configuration source
-tail -50 /var/log/erase-install-wrapper.log | grep "Configuration loaded"
+tail -50 /var/log/erase-install-wrapper.log | grep -i "CONFIG"
 
-# Should show:
-# [INFO] Configuration loaded from managed preferences (Configuration Profile)
+# Look for:
+# [CONFIG] Found managed JSON configuration
+# [CONFIG] Configuration loaded from: managed configuration (Jamf)
+```
+
+### Test Custom Configuration
+```bash
+# Test with local JSON to isolate issues
+sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --config=/tmp/test.json --show-config
 ```
 
 ---
@@ -356,22 +450,25 @@ fi
 
 ## Support
 
-**If settings aren't applying:**
-1. Check profile installed: `sudo profiles list | grep macjediwizard`
-2. Check managed prefs exist: `ls /Library/Managed\ Preferences/`
-3. Check wrapper log: `tail /var/log/erase-install-wrapper.log`
-4. Force Jamf update: `sudo jamf policy`
+**Quick Diagnostics:**
+1. Run: `sudo /Library/Management/erase-install/erase-install-defer-wrapper.sh --show-config`
+2. Check JSON exists: `ls -la /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json`
+3. Validate JSON: `plutil -lint /Library/Managed\ Preferences/com.macjediwizard.eraseinstall.config.json`
+4. Check wrapper log: `tail -50 /var/log/erase-install-wrapper.log | grep -i CONFIG`
+5. Force Jamf update: `sudo jamf policy`
 
 **Still having issues?**
-- Open GitHub issue with log excerpts
-- Include output of troubleshooting commands above
+- Test with custom config: `--config=/tmp/test.json --show-config`
+- Check for validation warnings in log
+- Open GitHub issue with log excerpts and `--show-config` output
 
 ---
 
 ## Reference Files
 
-- **Example Plist:** `com.macjediwizard.eraseinstall.config.example.plist`
-- **Detailed Guide:** `V2.0_CONFIG_PROFILE_IMPLEMENTATION.md`
+- **JSON Template:** `com.macjediwizard.eraseinstall.config.json`
+- **Detailed Guide:** `V2.0_JSON_CONFIG_IMPLEMENTATION.md`
+- **Testing Checklist:** `V2.0_TESTING_CHECKLIST.md`
 - **Main README:** `README.md`
 
 ---
