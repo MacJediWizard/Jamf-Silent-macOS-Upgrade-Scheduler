@@ -1,7 +1,4 @@
 {
-  "_comment": "Testing/QA Configuration",
-  "_description": "QA environment with extended deferrals, test mode, and no reboots",
-
   "core_settings": {
     "INSTALLER_OS": "15",
     "MAX_DEFERS": 99,

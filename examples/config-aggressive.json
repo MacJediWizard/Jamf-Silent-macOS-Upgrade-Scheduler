@@ -1,7 +1,4 @@
 {
-  "_comment": "Aggressive Enforcement Configuration - IT/Security Teams",
-  "_description": "Minimal deferrals and short timeout for critical security updates",
-
   "core_settings": {
     "INSTALLER_OS": "15",
     "MAX_DEFERS": 1,

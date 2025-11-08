@@ -1,7 +1,4 @@
 {
-  "_comment": "Flexible Configuration - Standard Users",
-  "_description": "Extended deferrals and timeout for standard users with flexible schedules",
-
   "core_settings": {
     "INSTALLER_OS": "15",
     "MAX_DEFERS": 5,

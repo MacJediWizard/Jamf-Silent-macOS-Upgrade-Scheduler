@@ -1,7 +1,4 @@
 {
-  "_comment": "Production Configuration - Standard Enterprise Deployment",
-  "_description": "Balanced settings for production deployment with 3 deferrals and 3-day timeout",
-
   "core_settings": {
     "INSTALLER_OS": "15",
     "MAX_DEFERS": 3,
