@@ -297,6 +297,151 @@ ABORT_ICON="SF=exclamationmark.triangle" # Icon for error dialog
 # JSON Configuration Loading (v2.0)
 # ========================================
 #
+#######################################
+# Get console user with multiple fallback methods
+# Arguments:
+#   None
+# Returns:
+#   Console username or empty string
+#######################################
+get_console_user() {
+    local console_user=""
+
+    # Method 1: stat on /dev/console
+    console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+
+    # Method 2: who command
+    if [[ -z "$console_user" || "$console_user" == "root" ]]; then
+        console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+    fi
+
+    # Method 3: scutil
+    if [[ -z "$console_user" || "$console_user" == "root" ]]; then
+        console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+    fi
+
+    # Method 4: ls -l on /dev/console
+    if [[ -z "$console_user" || "$console_user" == "root" ]]; then
+        console_user=$(ls -l /dev/console 2>/dev/null | awk '{print $3}')
+    fi
+
+    echo "$console_user"
+}
+
+#######################################
+# SECURITY: Validate positive integer within range
+# Arguments:
+#   $1 - Value to validate
+#   $2 - Default value
+#   $3 - Max value (optional, default 999999)
+#   $4 - Allow zero (optional, default true)
+# Returns:
+#   Validated value or default
+#######################################
+validate_positive_integer() {
+    local value="$1"
+    local default="$2"
+    local max="${3:-999999}"
+    local allow_zero="${4:-true}"
+
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "$default"
+        return 1
+    fi
+
+    if [[ "$allow_zero" != "true" && "$value" -eq 0 ]]; then
+        echo "$default"
+        return 1
+    fi
+
+    if [[ "$value" -gt "$max" ]]; then
+        echo "$default"
+        return 1
+    fi
+
+    echo "$value"
+    return 0
+}
+
+#######################################
+# SECURITY: Escape special characters for sed replacement
+# Arguments:
+#   $1 - String to escape
+# Returns:
+#   Escaped string safe for sed
+#######################################
+escape_sed() {
+    printf '%s\n' "$1" | sed -e 's/[\/&|]/\\&/g'
+}
+
+#######################################
+# SECURITY: Validate and sanitize file path
+# Arguments:
+#   $1 - Path to validate
+#   $2 - Expected prefix (optional)
+# Returns:
+#   0 if valid, 1 if invalid
+#######################################
+validate_path() {
+    local path="$1"
+    local expected_prefix="${2:-}"
+
+    # Check for path traversal sequences
+    if [[ "$path" == *".."* ]]; then
+        echo "[ERROR] Path traversal detected in: $path" >&2
+        return 1
+    fi
+
+    # If expected prefix provided, validate
+    if [[ -n "$expected_prefix" ]]; then
+        # Get absolute path if it exists
+        if [[ -e "$path" ]]; then
+            local resolved_path
+            resolved_path=$(cd "$(dirname "$path")" && pwd)/$(basename "$path") 2>/dev/null || echo "$path"
+            if [[ ! "$resolved_path" == "$expected_prefix"* ]]; then
+                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
+                return 1
+            fi
+        else
+            # For non-existent paths, just check the string
+            if [[ ! "$path" == "$expected_prefix"* ]]; then
+                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+#######################################
+# SECURITY: Create secure temporary file with mktemp
+# Arguments:
+#   $1 - Template name (e.g., "dialog-script")
+#   $2 - Extension (optional, e.g., ".sh")
+# Returns:
+#   Path to created temp file
+#######################################
+create_secure_temp() {
+    local template="$1"
+    local extension="${2:-.tmp}"
+    local temp_file
+
+    temp_file=$(mktemp "/tmp/${template}.XXXXXXXXXX${extension}") || {
+        echo "[ERROR] Failed to create secure temporary file" >&2
+        return 1
+    }
+
+    # Set restrictive permissions immediately
+    chmod 600 "$temp_file" || {
+        rm -f "$temp_file"
+        echo "[ERROR] Failed to set permissions on temporary file" >&2
+        return 1
+    }
+
+    echo "$temp_file"
+}
+
 # This function loads configuration from JSON files with fallback to script defaults
 # Priority: Managed JSON (Jamf) > Local JSON > Script defaults
 #
@@ -389,6 +534,33 @@ load_json_config() {
     LAUNCHDAEMON_LABEL=$(read_json "file_paths.LAUNCHDAEMON_LABEL" "com.macjediwizard.eraseinstall.schedule")
     LAUNCHDAEMON_PATH=$(read_json "file_paths.LAUNCHDAEMON_PATH" "/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist")
 
+    # SECURITY: Validate file paths to prevent path traversal
+    if ! validate_path "$PLIST" "/Library/Preferences"; then
+        echo "[CONFIG] WARNING: Invalid PLIST path, using default" >&2
+        PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
+    fi
+
+    if ! validate_path "$SCRIPT_PATH" "/Library/Management"; then
+        echo "[CONFIG] WARNING: Invalid SCRIPT_PATH, using default" >&2
+        SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
+    fi
+
+    if ! validate_path "$DIALOG_BIN"; then
+        echo "[CONFIG] WARNING: Invalid DIALOG_BIN path, using default" >&2
+        DIALOG_BIN="/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog"
+    fi
+
+    # Validate LaunchDaemon label (should be reverse domain notation)
+    if [[ ! "$LAUNCHDAEMON_LABEL" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+        echo "[CONFIG] WARNING: Invalid LAUNCHDAEMON_LABEL format, using default" >&2
+        LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"
+    fi
+
+    if ! validate_path "$LAUNCHDAEMON_PATH" "/Library/LaunchDaemons"; then
+        echo "[CONFIG] WARNING: Invalid LAUNCHDAEMON_PATH, using default" >&2
+        LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"
+    fi
+
     # Fallback for DIALOG_BIN if primary doesn't exist
     [ ! -x "$DIALOG_BIN" ] && DIALOG_BIN=$(read_json "file_paths.DIALOG_BIN_FALLBACK" "/usr/local/bin/dialog")
 
@@ -480,21 +652,81 @@ load_json_config() {
     ABORT_WIDTH=$(read_json "abort_button.ABORT_WIDTH" "750")
     ABORT_ICON=$(read_json "abort_button.ABORT_ICON" "SF=exclamationmark.triangle")
 
-    # Validate critical settings
-    if [[ ! "$INSTALLER_OS" =~ ^[0-9]+$ ]]; then
-        echo "[CONFIG] WARNING: INSTALLER_OS ($INSTALLER_OS) is not a valid number, using default: 15" >&2
+    # SECURITY: Validate all numeric settings
+    local validated_value
+
+    # Core settings
+    validated_value=$(validate_positive_integer "$INSTALLER_OS" "15" "99" "false")
+    if [[ "$validated_value" != "$INSTALLER_OS" ]]; then
+        echo "[CONFIG] WARNING: INSTALLER_OS ($INSTALLER_OS) is invalid, using default: 15" >&2
         INSTALLER_OS="15"
     fi
 
-    if [[ ! "$MAX_DEFERS" =~ ^[0-9]+$ ]] || [[ "$MAX_DEFERS" -lt 0 ]]; then
-        echo "[CONFIG] WARNING: MAX_DEFERS ($MAX_DEFERS) is not valid, using default: 3" >&2
-        MAX_DEFERS=3
+    validated_value=$(validate_positive_integer "$MAX_DEFERS" "3" "100" "true")
+    if [[ "$validated_value" != "$MAX_DEFERS" ]]; then
+        echo "[CONFIG] WARNING: MAX_DEFERS ($MAX_DEFERS) is invalid, using default: 3" >&2
+        MAX_DEFERS="3"
     fi
 
-    if [[ ! "$MAX_ABORTS" =~ ^[0-9]+$ ]] || [[ "$MAX_ABORTS" -lt 0 ]]; then
-        echo "[CONFIG] WARNING: MAX_ABORTS ($MAX_ABORTS) is not valid, using default: 3" >&2
-        MAX_ABORTS=3
+    validated_value=$(validate_positive_integer "$MAX_ABORTS" "3" "100" "true")
+    if [[ "$validated_value" != "$MAX_ABORTS" ]]; then
+        echo "[CONFIG] WARNING: MAX_ABORTS ($MAX_ABORTS) is invalid, using default: 3" >&2
+        MAX_ABORTS="3"
     fi
+
+    validated_value=$(validate_positive_integer "$FORCE_TIMEOUT_SECONDS" "259200" "604800" "false")
+    if [[ "$validated_value" != "$FORCE_TIMEOUT_SECONDS" ]]; then
+        echo "[CONFIG] WARNING: FORCE_TIMEOUT_SECONDS ($FORCE_TIMEOUT_SECONDS) is invalid, using default: 259200" >&2
+        FORCE_TIMEOUT_SECONDS="259200"
+    fi
+
+    # erase-install options
+    validated_value=$(validate_positive_integer "$REBOOT_DELAY" "60" "3600" "true")
+    if [[ "$validated_value" != "$REBOOT_DELAY" ]]; then
+        echo "[CONFIG] WARNING: REBOOT_DELAY ($REBOOT_DELAY) is invalid, using default: 60" >&2
+        REBOOT_DELAY="60"
+    fi
+
+    validated_value=$(validate_positive_integer "$POWER_WAIT_LIMIT" "300" "7200" "true")
+    if [[ "$validated_value" != "$POWER_WAIT_LIMIT" ]]; then
+        echo "[CONFIG] WARNING: POWER_WAIT_LIMIT ($POWER_WAIT_LIMIT) is invalid, using default: 300" >&2
+        POWER_WAIT_LIMIT="300"
+    fi
+
+    validated_value=$(validate_positive_integer "$MIN_DRIVE_SPACE" "50" "500" "false")
+    if [[ "$validated_value" != "$MIN_DRIVE_SPACE" ]]; then
+        echo "[CONFIG] WARNING: MIN_DRIVE_SPACE ($MIN_DRIVE_SPACE) is invalid, using default: 50" >&2
+        MIN_DRIVE_SPACE="50"
+    fi
+
+    # Dialog dimensions and timeouts
+    validated_value=$(validate_positive_integer "$DIALOG_HEIGHT" "250" "2000" "false")
+    [[ "$validated_value" != "$DIALOG_HEIGHT" ]] && DIALOG_HEIGHT="250"
+
+    validated_value=$(validate_positive_integer "$DIALOG_WIDTH" "650" "3000" "false")
+    [[ "$validated_value" != "$DIALOG_WIDTH" ]] && DIALOG_WIDTH="650"
+
+    validated_value=$(validate_positive_integer "$PREINSTALL_COUNTDOWN" "60" "600" "false")
+    [[ "$validated_value" != "$PREINSTALL_COUNTDOWN" ]] && PREINSTALL_COUNTDOWN="60"
+
+    validated_value=$(validate_positive_integer "$SCHEDULED_COUNTDOWN" "60" "600" "false")
+    [[ "$validated_value" != "$SCHEDULED_COUNTDOWN" ]] && SCHEDULED_COUNTDOWN="60"
+
+    validated_value=$(validate_positive_integer "$AUTH_NOTICE_TIMEOUT" "0" "600" "true")
+    [[ "$validated_value" != "$AUTH_NOTICE_TIMEOUT" ]] && AUTH_NOTICE_TIMEOUT="0"
+
+    validated_value=$(validate_positive_integer "$ABORT_COUNTDOWN" "15" "600" "false")
+    [[ "$validated_value" != "$ABORT_COUNTDOWN" ]] && ABORT_COUNTDOWN="15"
+
+    validated_value=$(validate_positive_integer "$ABORT_DEFER_MINUTES" "5" "1440" "false")
+    [[ "$validated_value" != "$ABORT_DEFER_MINUTES" ]] && ABORT_DEFER_MINUTES="5"
+
+    # Logging settings
+    validated_value=$(validate_positive_integer "$MAX_LOG_SIZE_MB" "10" "100" "false")
+    [[ "$validated_value" != "$MAX_LOG_SIZE_MB" ]] && MAX_LOG_SIZE_MB="10"
+
+    validated_value=$(validate_positive_integer "$MAX_LOG_FILES" "5" "50" "false")
+    [[ "$validated_value" != "$MAX_LOG_FILES" ]] && MAX_LOG_FILES="5"
 
     # Log configuration summary
     echo "[CONFIG] ========================================" >&2
@@ -769,15 +1001,32 @@ show_auth_notice() {
   
   # Run dialog as user to avoid TCC issues
   local result=1
-  
+
   if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
     log_info "Running pre-auth dialog as user $console_user to avoid TCC permissions issues"
-    
-    # Generate a unique ID for this dialog execution
-    local dialog_id="$(date +%Y%m%d%H%M%S)-$$"
-    local temp_script="/tmp/preauth-dialog-${dialog_id}.sh"
-    local result_file="/tmp/dialog-result-${dialog_id}.txt"
-    
+
+    # SECURITY FIX: Use mktemp for secure temporary files
+    local temp_script
+    local result_file
+    local exec_log
+    temp_script=$(create_secure_temp "preauth-dialog" ".sh") || {
+        log_error "Failed to create secure temporary script file"
+        return 1
+    }
+    result_file=$(create_secure_temp "dialog-result" ".txt") || {
+        rm -f "$temp_script"
+        log_error "Failed to create secure result file"
+        return 1
+    }
+    exec_log=$(create_secure_temp "dialog-exec" ".log") || {
+        rm -f "$temp_script" "$result_file"
+        log_error "Failed to create secure exec log file"
+        return 1
+    }
+
+    # Setup cleanup trap for these temp files
+    trap 'rm -f "$temp_script" "$result_file" "$exec_log"' RETURN
+
     cat > "$temp_script" << 'EOFSCRIPT'
 #!/bin/bash
 export DISPLAY=:0
@@ -810,18 +1059,28 @@ echo "DIALOG_EXIT_CODE:$DIALOG_RESULT" > "RESULT_FILE_PLACEHOLDER"
 exit 0
 EOFSCRIPT
     
-    # Replace placeholders with actual values
-    sed -i '' "s|CONSOLE_USER_PLACEHOLDER|$console_user|g" "$temp_script"
-    sed -i '' "s|DIALOG_BIN_PLACEHOLDER|$DIALOG_BIN|g" "$temp_script"
-    sed -i '' "s|DISPLAY_TITLE_PLACEHOLDER|$display_title|g" "$temp_script"
-    sed -i '' "s|AUTH_NOTICE_MESSAGE_PLACEHOLDER|$AUTH_NOTICE_MESSAGE|g" "$temp_script"
-    sed -i '' "s|AUTH_NOTICE_BUTTON_PLACEHOLDER|$AUTH_NOTICE_BUTTON|g" "$temp_script"
-    sed -i '' "s|AUTH_NOTICE_ICON_PLACEHOLDER|$AUTH_NOTICE_ICON|g" "$temp_script"
+    # SECURITY FIX: Replace placeholders with escaped values to prevent sed injection
+    local console_user_escaped=$(escape_sed "$console_user")
+    local dialog_bin_escaped=$(escape_sed "$DIALOG_BIN")
+    local display_title_escaped=$(escape_sed "$display_title")
+    local auth_notice_message_escaped=$(escape_sed "$AUTH_NOTICE_MESSAGE")
+    local auth_notice_button_escaped=$(escape_sed "$AUTH_NOTICE_BUTTON")
+    local auth_notice_icon_escaped=$(escape_sed "$AUTH_NOTICE_ICON")
+    local dialog_position_escaped=$(escape_sed "$DIALOG_POSITION")
+    local timeout_args_escaped=$(escape_sed "$timeout_args")
+    local result_file_escaped=$(escape_sed "$result_file")
+
+    sed -i '' "s|CONSOLE_USER_PLACEHOLDER|$console_user_escaped|g" "$temp_script"
+    sed -i '' "s|DIALOG_BIN_PLACEHOLDER|$dialog_bin_escaped|g" "$temp_script"
+    sed -i '' "s|DISPLAY_TITLE_PLACEHOLDER|$display_title_escaped|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_MESSAGE_PLACEHOLDER|$auth_notice_message_escaped|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_BUTTON_PLACEHOLDER|$auth_notice_button_escaped|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_ICON_PLACEHOLDER|$auth_notice_icon_escaped|g" "$temp_script"
     sed -i '' "s|AUTH_NOTICE_HEIGHT_PLACEHOLDER|$AUTH_NOTICE_HEIGHT|g" "$temp_script"
     sed -i '' "s|AUTH_NOTICE_WIDTH_PLACEHOLDER|$AUTH_NOTICE_WIDTH|g" "$temp_script"
-    sed -i '' "s|DIALOG_POSITION_PLACEHOLDER|$DIALOG_POSITION|g" "$temp_script"
-    sed -i '' "s|TIMEOUT_ARGS_PLACEHOLDER|$timeout_args|g" "$temp_script"
-    sed -i '' "s|RESULT_FILE_PLACEHOLDER|$result_file|g" "$temp_script"
+    sed -i '' "s|DIALOG_POSITION_PLACEHOLDER|$dialog_position_escaped|g" "$temp_script"
+    sed -i '' "s|TIMEOUT_ARGS_PLACEHOLDER|$timeout_args_escaped|g" "$temp_script"
+    sed -i '' "s|RESULT_FILE_PLACEHOLDER|$result_file_escaped|g" "$temp_script"
     
     # After the sed replacements, add:
     log_debug "Generated temp script content:"
@@ -842,7 +1101,7 @@ EOFSCRIPT
     log_debug "Executing temp script as user $console_user"
     
     # Method 1: Direct sudo execution (most reliable)
-    sudo -u "$console_user" bash "$temp_script" > /tmp/dialog-exec-${dialog_id}.log 2>&1 &
+    sudo -u "$console_user" bash "$temp_script" > "$exec_log" 2>&1 &
     local script_pid=$!
     
     log_debug "Started script process with PID: $script_pid"
@@ -4674,35 +4933,35 @@ sleep 0.5
 log_message "Pre-authentication notice completed, proceeding with installation"
 fi
 
-# Build command arguments properly - FIX FOR THE EMPTY COMMAND ISSUE
-CMD="$ERASE_INSTALL_PATH"
+# Build command arguments properly using array (SECURITY FIX: prevents command injection)
+declare -a cmd_args=("$ERASE_INSTALL_PATH")
 
 # Add reinstall parameter
 if [[ "$REINSTALL" == "true" ]]; then
 log_message "Mode: Reinstall (not erase-install)"
-CMD="$CMD --reinstall"
+cmd_args+=(--reinstall)
 fi
 
 # Add reboot delay if specified
 if [ "$REBOOT_DELAY" -gt 0 ]; then
 log_message "Using reboot delay: $REBOOT_DELAY seconds"
-CMD="$CMD --rebootdelay $REBOOT_DELAY"
+cmd_args+=(--rebootdelay "$REBOOT_DELAY")
 fi
 
 # Add no filesystem option if enabled
 if [ "$NO_FS" = true ]; then
 log_message "File system check disabled (--no-fs)"
-CMD="$CMD --no-fs"
+cmd_args+=(--no-fs)
 fi
 
 # Add power check and wait limit if enabled
 if [ "$CHECK_POWER" = true ]; then
 log_message "Power check enabled: erase-install will verify power connection"
-CMD="$CMD --check-power"
+cmd_args+=(--check-power)
 
 if [ "$POWER_WAIT_LIMIT" -gt 0 ]; then
 log_message "Power wait limit set to $POWER_WAIT_LIMIT seconds"
-CMD="$CMD --power-wait-limit $POWER_WAIT_LIMIT"
+cmd_args+=(--power-wait-limit "$POWER_WAIT_LIMIT")
 else
 log_message "Using default power wait limit (60 seconds)"
 fi
@@ -4712,77 +4971,78 @@ fi
 
 # Add minimum drive space
 log_message "Minimum drive space: $MIN_DRIVE_SPACE GB"
-CMD="$CMD --min-drive-space $MIN_DRIVE_SPACE"
+cmd_args+=(--min-drive-space "$MIN_DRIVE_SPACE")
 
 # Add cleanup option if enabled
 if [ "$CLEANUP_AFTER_USE" = true ]; then
 log_message "Cleanup after use enabled"
-CMD="$CMD --cleanup-after-use"
+cmd_args+=(--cleanup-after-use)
 fi
 
 # Add test mode if enabled
 if [[ $TEST_MODE == true ]]; then
 log_message "Test mode enabled"
-CMD="$CMD --test-run"
+cmd_args+=(--test-run)
 fi
 
 # Add verbose logging if debug mode enabled
 if [ "$DEBUG_MODE" = true ]; then
 log_message "Verbose logging enabled for erase-install"
-CMD="$CMD --verbose"
+cmd_args+=(--verbose)
 fi
 
 # Specify target OS version to use cached installer or download specific version
 if [ -n "$INSTALLER_OS" ]; then
 log_message "Specifying target OS version: $INSTALLER_OS (will use cached installer if available)"
-CMD="$CMD --os $INSTALLER_OS"
+cmd_args+=(--os "$INSTALLER_OS")
 fi
-
-# Log command before no-reboot check
-log_message "Command before no-reboot check: $CMD"
 
 # Add no-reboot override if enabled (highest safety priority)
 # This should be last to override any other reboot settings
 if [ "$PREVENT_ALL_REBOOTS" = "true" ]; then
 log_message "SAFETY FEATURE: --no-reboot flag added to prevent any reboots"
-CMD="$CMD --no-reboot"
-log_message "VERIFIED: Final command with --no-reboot: $CMD"
+cmd_args+=(--no-reboot)
 elif [ "$TEST_MODE" = "true" ]; then
 # Double safety check - always add no-reboot in test mode regardless of PREVENT_ALL_REBOOTS
 log_message "SAFETY FEATURE: Adding --no-reboot flag because test mode is enabled"
-CMD="$CMD --no-reboot"
-log_message "VERIFIED: Final command with --no-reboot (test mode): $CMD"
+cmd_args+=(--no-reboot)
 fi
 
 # Safety check to verify test mode flag is correctly passed
-if [ "$TEST_MODE" = "true" ] && [[ "$CMD" != *"--test-run"* ]]; then
+has_test_run=false
+has_no_reboot=false
+for arg in "${cmd_args[@]}"; do
+    [[ "$arg" == "--test-run" ]] && has_test_run=true
+    [[ "$arg" == "--no-reboot" ]] && has_no_reboot=true
+done
+
+if [ "$TEST_MODE" = "true" ] && [ "$has_test_run" = false ]; then
 log_message "CRITICAL SAFETY CHECK FAILED: Test mode enabled but --test-run missing from command"
-log_message "Command was: $CMD"
+log_message "Command args: ${cmd_args[*]}"
 log_message "Aborting installation to prevent unintended reboot"
 exit 1
 fi
 
 # Execute the command with proper error handling
-log_message "Command about to execute: $CMD"
+log_message "Command about to execute: ${cmd_args[*]}"
 log_message "PREVENT_ALL_REBOOTS value: $PREVENT_ALL_REBOOTS"
 log_message "TEST_MODE value: $TEST_MODE"
 
 # Critical safety check - absolutely prevent reboots in test mode
-if [[ "$TEST_MODE" = "true" && "$CMD" != *"--no-reboot"* ]]; then
+if [ "$TEST_MODE" = "true" ] && [ "$has_no_reboot" = false ]; then
 log_message "CRITICAL SAFETY FAILURE: Test mode enabled but --no-reboot missing from command"
 log_message "Adding --no-reboot as emergency safety measure"
-CMD="$CMD --no-reboot"
-log_message "Modified command: $CMD"
+cmd_args+=(--no-reboot)
 fi
 
 # Final verification - log full command
-log_message "FINAL COMMAND TO EXECUTE: $CMD"
+log_message "FINAL COMMAND TO EXECUTE: ${cmd_args[*]}"
 
 # Add PATH to ensure binary can be found
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-# Execute the command
-eval "$CMD"
+# Execute the command using array expansion (SECURITY: prevents command injection)
+"${cmd_args[@]}"
 
 # Save exit code with enhanced error handling
 RESULT=$?
@@ -6978,15 +7238,6 @@ if [[ -z "$CAN_DEFER" ]]; then
 fi
 
 log_debug "State variables initialized: DEFER_COUNT=$CURRENT_DEFER_COUNT, FORCE_INSTALL=$FORCE_INSTALL, CAN_DEFER=$CAN_DEFER"
-
-# TEMPORARY DEBUG BLOCK - REMOVE AFTER TESTING
-log_info "=== STATE VERIFICATION TEST ==="
-log_info "CURRENT_DEFER_COUNT: ${CURRENT_DEFER_COUNT:-UNDEFINED}"
-log_info "CURRENT_ABORT_COUNT: ${CURRENT_ABORT_COUNT:-UNDEFINED}" 
-log_info "FORCE_INSTALL: ${FORCE_INSTALL:-UNDEFINED}"
-log_info "CAN_DEFER: ${CAN_DEFER:-UNDEFINED}"
-log_info "CAN_ABORT: ${CAN_ABORT:-UNDEFINED}"
-log_info "=== END STATE VERIFICATION ==="
 
 # Check if system is already running the target OS version
 log_info "Performing early OS version check..."
