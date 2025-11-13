@@ -442,6 +442,47 @@ create_secure_temp() {
     echo "$temp_file"
 }
 
+#######################################
+# Apply branding to dialog parameters
+# Arguments:
+#   $1 - Dialog title
+#   $2 - Dialog message
+#   $3 - Dialog icon
+# Returns:
+#   Prints three lines: branded_title, branded_message, branded_icon
+#######################################
+apply_branding() {
+    local title="$1"
+    local message="$2"
+    local icon="$3"
+    local branded_title="$title"
+    local branded_message="$message"
+    local branded_icon="$icon"
+
+    # Only apply branding if enabled
+    if [[ "$ENABLE_BRANDING" == "true" ]]; then
+        # Add company name to title if enabled
+        if [[ "$SHOW_COMPANY_NAME_IN_TITLE" == "true" ]] && [[ -n "$COMPANY_NAME" ]]; then
+            branded_title="${COMPANY_NAME} - ${title}"
+        fi
+
+        # Add support contact to message if enabled
+        if [[ "$SHOW_SUPPORT_IN_MESSAGE" == "true" ]] && [[ -n "$SUPPORT_CONTACT" ]]; then
+            branded_message="${message}\n\n---\n${SUPPORT_CONTACT}"
+        fi
+
+        # Use company logo if enabled and file exists
+        if [[ "$USE_COMPANY_LOGO" == "true" ]] && [[ -f "$COMPANY_LOGO" ]]; then
+            branded_icon="$COMPANY_LOGO"
+        fi
+    fi
+
+    # Output results (one per line for easy parsing)
+    echo "$branded_title"
+    echo "$branded_message"
+    echo "$branded_icon"
+}
+
 # This function loads configuration from JSON files with fallback to script defaults
 # Priority: Managed JSON (Jamf) > Local JSON > Script defaults
 #
@@ -574,6 +615,17 @@ load_json_config() {
     # Load Logging Configuration
     MAX_LOG_SIZE_MB=$(read_json "logging.MAX_LOG_SIZE_MB" "10")
     MAX_LOG_FILES=$(read_json "logging.MAX_LOG_FILES" "5")
+
+    # Load Branding Configuration
+    ENABLE_BRANDING=$(read_json "branding.ENABLE_BRANDING" "false")
+    COMPANY_NAME=$(read_json "branding.COMPANY_NAME" "Your Company Name")
+    COMPANY_LOGO=$(read_json "branding.COMPANY_LOGO" "/Library/Management/branding/logo.png")
+    SUPPORT_CONTACT=$(read_json "branding.SUPPORT_CONTACT" "IT Support: support@company.com or ext. 1234")
+    SHOW_COMPANY_NAME_IN_TITLE=$(read_json "branding.SHOW_COMPANY_NAME_IN_TITLE" "true")
+    SHOW_SUPPORT_IN_MESSAGE=$(read_json "branding.SHOW_SUPPORT_IN_MESSAGE" "true")
+    USE_COMPANY_LOGO=$(read_json "branding.USE_COMPANY_LOGO" "true")
+    LOGO_WIDTH=$(read_json "branding.LOGO_WIDTH" "128")
+    LOGO_HEIGHT=$(read_json "branding.LOGO_HEIGHT" "128")
 
     # Load Main Dialog Settings
     DIALOG_TITLE=$(read_json "main_dialog.DIALOG_TITLE" "macOS Upgrade Required")
@@ -728,6 +780,21 @@ load_json_config() {
     validated_value=$(validate_positive_integer "$MAX_LOG_FILES" "5" "50" "false")
     [[ "$validated_value" != "$MAX_LOG_FILES" ]] && MAX_LOG_FILES="5"
 
+    # Branding settings validation
+    validated_value=$(validate_positive_integer "$LOGO_WIDTH" "128" "512" "false")
+    [[ "$validated_value" != "$LOGO_WIDTH" ]] && LOGO_WIDTH="128"
+
+    validated_value=$(validate_positive_integer "$LOGO_HEIGHT" "128" "512" "false")
+    [[ "$validated_value" != "$LOGO_HEIGHT" ]] && LOGO_HEIGHT="128"
+
+    # Validate company logo path if branding is enabled
+    if [[ "$ENABLE_BRANDING" == "true" ]] && [[ "$USE_COMPANY_LOGO" == "true" ]]; then
+        if [[ ! -f "$COMPANY_LOGO" ]]; then
+            echo "[CONFIG] WARNING: Company logo not found at $COMPANY_LOGO - will use default icon" >&2
+            USE_COMPANY_LOGO="false"
+        fi
+    fi
+
     # Log configuration summary
     echo "[CONFIG] ========================================" >&2
     echo "[CONFIG] Configuration loaded from: $config_source" >&2
@@ -742,6 +809,14 @@ load_json_config() {
     echo "[CONFIG]   Debug Mode: ${DEBUG_MODE}" >&2
     echo "[CONFIG]   Skip OS Check: ${SKIP_OS_VERSION_CHECK}" >&2
     echo "[CONFIG]   Prevent Reboots: ${PREVENT_ALL_REBOOTS}" >&2
+    echo "[CONFIG] Branding:" >&2
+    echo "[CONFIG]   Enabled: ${ENABLE_BRANDING}" >&2
+    if [[ "$ENABLE_BRANDING" == "true" ]]; then
+        echo "[CONFIG]   Company Name: ${COMPANY_NAME}" >&2
+        echo "[CONFIG]   Use Logo: ${USE_COMPANY_LOGO}" >&2
+        [[ "$USE_COMPANY_LOGO" == "true" ]] && echo "[CONFIG]   Logo Path: ${COMPANY_LOGO}" >&2
+        echo "[CONFIG]   Show Support Info: ${SHOW_SUPPORT_IN_MESSAGE}" >&2
+    fi
     echo "[CONFIG] ========================================" >&2
 
     return 0
@@ -6100,8 +6175,16 @@ show_prompt() {
   # For test mode, add indication in the dialog title
   local display_title="$DIALOG_TITLE"
   [[ "$TEST_MODE" = true ]] && display_title="${DIALOG_TITLE_TEST_MODE}"
-  
-  local raw; raw=$("${DIALOG_BIN}" --title "${display_title}" --message "${DIALOG_MESSAGE}" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${DIALOG_HEIGHT} --width ${DIALOG_WIDTH} --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont ${DIALOG_MESSAGEFONT} --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+
+  # Apply branding to dialog parameters
+  local branded_title branded_message branded_icon
+  local branding_result
+  branding_result=$(apply_branding "$display_title" "$DIALOG_MESSAGE" "$DIALOG_ICON")
+  branded_title=$(echo "$branding_result" | sed -n '1p')
+  branded_message=$(echo "$branding_result" | sed -n '2p')
+  branded_icon=$(echo "$branding_result" | sed -n '3p')
+
+  local raw; raw=$("${DIALOG_BIN}" --title "${branded_title}" --message "${branded_message}" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${DIALOG_HEIGHT} --width ${DIALOG_WIDTH} --moveable --icon "${branded_icon}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont ${DIALOG_MESSAGEFONT} --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
   local code=$?
   log_debug "SwiftDialog exit code: ${code}"
   log_debug "SwiftDialog raw output: ${raw}"
@@ -6155,7 +6238,15 @@ show_prompt() {
       # For test mode, add indication in the dialog title
       local display_title="$SCHEDULED_TITLE"
       [[ "$TEST_MODE" = true ]] && display_title="${SCHEDULED_TITLE_TEST_MODE}"
-      local sub; sub=$("${DIALOG_BIN}" --title "${display_title}" --message "Select installation time:" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${SCHEDULED_HEIGHT} --width ${SCHEDULED_WIDTH} --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "${SCHEDULED_DIALOG_MESSAGEFONT}" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+
+      # Apply branding to schedule dialog
+      local sched_branding
+      sched_branding=$(apply_branding "$display_title" "Select installation time:" "$DIALOG_ICON")
+      local sched_title=$(echo "$sched_branding" | sed -n '1p')
+      local sched_message=$(echo "$sched_branding" | sed -n '2p')
+      local sched_icon=$(echo "$sched_branding" | sed -n '3p')
+
+      local sub; sub=$("${DIALOG_BIN}" --title "${sched_title}" --message "${sched_message}" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${SCHEDULED_HEIGHT} --width ${SCHEDULED_WIDTH} --moveable --icon "${sched_icon}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "${SCHEDULED_DIALOG_MESSAGEFONT}" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
       subcode=$?
       log_debug "Schedule dialog exit code: ${subcode}"
       log_debug "Schedule raw output: ${sub}"
@@ -6167,9 +6258,16 @@ show_prompt() {
       time_data=$(validate_time "$sched")
       if [[ $? -ne 0 || -z "$time_data" ]]; then
         log_warn "Invalid time selection: $sched"
-        
+
+        # Apply branding to error dialog
+        local error_branding
+        error_branding=$(apply_branding "$ERROR_DIALOG_TITLE" "$ERROR_DIALOG_MESSAGE" "$ERROR_DIALOG_ICON")
+        local error_title=$(echo "$error_branding" | sed -n '1p')
+        local error_message=$(echo "$error_branding" | sed -n '2p')
+        local error_icon=$(echo "$error_branding" | sed -n '3p')
+
         # Show error dialog
-        "${DIALOG_BIN}" --title "${ERROR_DIALOG_TITLE}" --message "${ERROR_DIALOG_MESSAGE}" --icon "${ERROR_DIALOG_ICON}" --button1text "${ERROR_CONTINUE_TEXT}" --height ${ERROR_DIALOG_HEIGHT} --width ${ERROR_DIALOG_WIDTH} --position "${DIALOG_POSITION}"
+        "${DIALOG_BIN}" --title "${error_title}" --message "${error_message}" --icon "${error_icon}" --button1text "${ERROR_CONTINUE_TEXT}" --height ${ERROR_DIALOG_HEIGHT} --width ${ERROR_DIALOG_WIDTH} --position "${DIALOG_POSITION}"
         
         # Return to main prompt instead of exiting
         show_prompt
