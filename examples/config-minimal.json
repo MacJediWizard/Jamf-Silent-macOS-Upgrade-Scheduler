@@ -1,0 +1,10 @@
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 3
+  },
+  "feature_toggles": {
+    "TEST_MODE": false,
+    "DEBUG_MODE": false
+  }
+}

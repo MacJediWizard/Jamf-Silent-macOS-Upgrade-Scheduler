@@ -1,0 +1,53 @@
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 1,
+    "MAX_ABORTS": 1,
+    "FORCE_TIMEOUT_SECONDS": 86400
+  },
+
+  "feature_toggles": {
+    "TEST_MODE": false,
+    "DEBUG_MODE": false,
+    "PREVENT_ALL_REBOOTS": false,
+    "SKIP_OS_VERSION_CHECK": false,
+    "AUTO_INSTALL_DEPENDENCIES": true
+  },
+
+  "main_dialog": {
+    "DIALOG_TITLE": "⚠️ URGENT: Security Update Required",
+    "DIALOG_MESSAGE": "A critical security update is required. You have ONE deferral remaining.\n\nThis upgrade must be completed within 24 hours.",
+    "DIALOG_POSITION": "center",
+    "DIALOG_HEIGHT": "300",
+    "DIALOG_WIDTH": "700",
+    "DIALOG_DEFER_TEXT": "Defer 24 Hours (1 remaining)"
+  },
+
+  "auth_notice": {
+    "SHOW_AUTH_NOTICE": true,
+    "AUTH_NOTICE_TITLE": "⚠️ Admin Access Required - Security Update",
+    "AUTH_NOTICE_MESSAGE": "URGENT: You will be prompted for admin credentials to complete this critical security update.\n\nIf you do not have admin access, contact IT immediately.",
+    "AUTH_NOTICE_TIMEOUT": 0
+  },
+
+  "abort_button": {
+    "ENABLE_ABORT_BUTTON": true,
+    "ABORT_BUTTON_TEXT": "Abort (1 remaining)",
+    "MAX_ABORTS": 1,
+    "ABORT_DEFER_MINUTES": 5
+  },
+
+  "erase_install_options": {
+    "REBOOT_DELAY": 60,
+    "REINSTALL": true,
+    "NO_FS": true,
+    "CHECK_POWER": true,
+    "MIN_DRIVE_SPACE": 50,
+    "CLEANUP_AFTER_USE": true
+  },
+
+  "logging": {
+    "MAX_LOG_SIZE_MB": 10,
+    "MAX_LOG_FILES": 5
+  }
+}

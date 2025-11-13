@@ -31,13 +31,26 @@
 # See the LICENSE file in the root of this repository.
 #
 # CHANGELOG:
-# v1.7.3 - CRITICAL FIX: Actually implement --os parameter in run_erase_install() function
-#         - FIXED: Added missing --os parameter to erase-install command execution
-#         - NOTE: v1.7.1 changelog claimed this fix but implementation was never added
-#         - FIXED: run_erase_install() now correctly passes INSTALLER_OS to erase-install.sh
-#         - IMPACT: Script now uses cached installers correctly
-#         - IMPACT: Downloads correct OS version (e.g., 15 instead of defaulting to latest)
-#         - IMPACT: Eliminates downloading wrong macOS version (e.g., 26.x instead of 15.x)
+# v2.0.0 - MAJOR RELEASE: JSON-based configuration management
+#         - NEW: JSON configuration file support for centralized settings management
+#         - NEW: Managed preferences support for Jamf Configuration Profile deployment
+#         - NEW: load_json_config() function loads settings from JSON with fallback to script defaults
+#         - NEW: Four-tier configuration priority: Custom (--config) > Managed JSON > Local JSON > Script Defaults
+#         - NEW: --show-config command to display current configuration without running script
+#         - NEW: --config=/path/to/file.json parameter to specify custom JSON config location
+#         - NEW: Configuration validation with warnings for invalid values
+#         - NEW: Enhanced configuration logging showing all loaded settings
+#         - ENHANCED: All User Configuration Section settings can now be controlled via JSON
+#         - ENHANCED: Instant settings updates via Jamf without redeploying script
+#         - ENHANCED: Per-department configuration support with different JSON configs
+#         - ENHANCED: Command-line parameter processing for custom configs and testing
+#         - BACKWARDS COMPATIBLE: Falls back to hardcoded defaults if no JSON present
+#         - DOCUMENTATION: Complete JSON config examples and Jamf deployment guides
+#         - JAMF READY: Deploy JSON via Configuration Profile Files and Processes payload
+#         - CRITICAL FIX: Actually implemented --os parameter in run_erase_install() function
+#         - NOTE: v1.7.1 claimed to fix this but implementation was missing from run_erase_install()
+#         - FIXED: Script now correctly passes INSTALLER_OS to erase-install.sh in ALL execution paths
+#         - IMPACT: Ensures cached installers are used and correct OS version is downloaded
 # v1.7.2 - CRITICAL FIX: Fixed version detection to filter by INSTALLER_OS major version
 #         - FIXED: get_available_macos_version() now uses --os parameter with erase-install --list
 #         - FIXED: SOFA fallback now searches for matching major version instead of using latest
@@ -169,7 +182,7 @@
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="1.7.3"              # Current version of this script
+SCRIPT_VERSION="2.0.0"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -278,6 +291,462 @@ ABORT_HEIGHT=250                         # Dialog height in pixels
 ABORT_WIDTH=750                          # Dialog width in pixels
 ABORT_ICON="SF=exclamationmark.triangle" # Icon for error dialog
 #
+########################################################################################################################################################################
+#
+# ========================================
+# JSON Configuration Loading (v2.0)
+# ========================================
+#
+#######################################
+# Get console user with multiple fallback methods
+# Arguments:
+#   None
+# Returns:
+#   Console username or empty string
+#######################################
+get_console_user() {
+    local console_user=""
+
+    # Method 1: stat on /dev/console
+    console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+
+    # Method 2: who command
+    if [[ -z "$console_user" || "$console_user" == "root" ]]; then
+        console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
+    fi
+
+    # Method 3: scutil
+    if [[ -z "$console_user" || "$console_user" == "root" ]]; then
+        console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+    fi
+
+    # Method 4: ls -l on /dev/console
+    if [[ -z "$console_user" || "$console_user" == "root" ]]; then
+        console_user=$(ls -l /dev/console 2>/dev/null | awk '{print $3}')
+    fi
+
+    echo "$console_user"
+}
+
+#######################################
+# SECURITY: Validate positive integer within range
+# Arguments:
+#   $1 - Value to validate
+#   $2 - Default value
+#   $3 - Max value (optional, default 999999)
+#   $4 - Allow zero (optional, default true)
+# Returns:
+#   Validated value or default
+#######################################
+validate_positive_integer() {
+    local value="$1"
+    local default="$2"
+    local max="${3:-999999}"
+    local allow_zero="${4:-true}"
+
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "$default"
+        return 1
+    fi
+
+    if [[ "$allow_zero" != "true" && "$value" -eq 0 ]]; then
+        echo "$default"
+        return 1
+    fi
+
+    if [[ "$value" -gt "$max" ]]; then
+        echo "$default"
+        return 1
+    fi
+
+    echo "$value"
+    return 0
+}
+
+#######################################
+# SECURITY: Escape special characters for sed replacement
+# Arguments:
+#   $1 - String to escape
+# Returns:
+#   Escaped string safe for sed
+#######################################
+escape_sed() {
+    printf '%s\n' "$1" | sed -e 's/[\/&|]/\\&/g'
+}
+
+#######################################
+# SECURITY: Validate and sanitize file path
+# Arguments:
+#   $1 - Path to validate
+#   $2 - Expected prefix (optional)
+# Returns:
+#   0 if valid, 1 if invalid
+#######################################
+validate_path() {
+    local path="$1"
+    local expected_prefix="${2:-}"
+
+    # Check for path traversal sequences
+    if [[ "$path" == *".."* ]]; then
+        echo "[ERROR] Path traversal detected in: $path" >&2
+        return 1
+    fi
+
+    # If expected prefix provided, validate
+    if [[ -n "$expected_prefix" ]]; then
+        # Get absolute path if it exists
+        if [[ -e "$path" ]]; then
+            local resolved_path
+            resolved_path=$(cd "$(dirname "$path")" && pwd)/$(basename "$path") 2>/dev/null || echo "$path"
+            if [[ ! "$resolved_path" == "$expected_prefix"* ]]; then
+                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
+                return 1
+            fi
+        else
+            # For non-existent paths, just check the string
+            if [[ ! "$path" == "$expected_prefix"* ]]; then
+                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+#######################################
+# SECURITY: Create secure temporary file with mktemp
+# Arguments:
+#   $1 - Template name (e.g., "dialog-script")
+#   $2 - Extension (optional, e.g., ".sh")
+# Returns:
+#   Path to created temp file
+#######################################
+create_secure_temp() {
+    local template="$1"
+    local extension="${2:-.tmp}"
+    local temp_file
+
+    temp_file=$(mktemp "/tmp/${template}.XXXXXXXXXX${extension}") || {
+        echo "[ERROR] Failed to create secure temporary file" >&2
+        return 1
+    }
+
+    # Set restrictive permissions immediately
+    chmod 600 "$temp_file" || {
+        rm -f "$temp_file"
+        echo "[ERROR] Failed to set permissions on temporary file" >&2
+        return 1
+    }
+
+    echo "$temp_file"
+}
+
+# This function loads configuration from JSON files with fallback to script defaults
+# Priority: Managed JSON (Jamf) > Local JSON > Script defaults
+#
+# JSON file locations:
+#   - /Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json (Jamf deployed)
+#   - /Library/Preferences/com.macjediwizard.eraseinstall.config.json (local)
+#
+
+#######################################
+# Load configuration from JSON file with fallback to defaults
+# Globals:
+#   All configuration variables from User Configuration Section
+# Arguments:
+#   None
+# Returns:
+#   0 if JSON loaded successfully, 1 if using script defaults
+#######################################
+load_json_config() {
+    local managed_json="/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json"
+    local local_json="/Library/Preferences/com.macjediwizard.eraseinstall.config.json"
+    local config_file=""
+    local config_source="script defaults"
+    local json_loaded=false
+
+    # Check for custom config path (command-line override) - highest priority
+    if [[ -n "$CUSTOM_CONFIG_PATH" ]]; then
+        if [ -f "$CUSTOM_CONFIG_PATH" ]; then
+            config_file="$CUSTOM_CONFIG_PATH"
+            config_source="custom configuration (--config parameter)"
+            json_loaded=true
+            echo "[CONFIG] Using custom JSON configuration: $CUSTOM_CONFIG_PATH" >&2
+        else
+            echo "[CONFIG] ERROR: Custom config file not found: $CUSTOM_CONFIG_PATH" >&2
+            echo "[CONFIG] Falling back to standard configuration search" >&2
+        fi
+    fi
+
+    # Check for managed configuration (Jamf deployed) - second priority
+    if [[ -z "$config_file" ]] && [ -f "$managed_json" ]; then
+        config_file="$managed_json"
+        config_source="managed configuration (Jamf)"
+        json_loaded=true
+        echo "[CONFIG] Found managed JSON configuration: $managed_json" >&2
+    # Check for local configuration - third priority
+    elif [[ -z "$config_file" ]] && [ -f "$local_json" ]; then
+        config_file="$local_json"
+        config_source="local configuration"
+        json_loaded=true
+        echo "[CONFIG] Found local JSON configuration: $local_json" >&2
+    elif [[ -z "$config_file" ]]; then
+        echo "[CONFIG] No JSON configuration found, using script defaults from User Configuration Section" >&2
+        return 1
+    fi
+
+    # Validate JSON syntax before attempting to read
+    if ! plutil -lint "$config_file" > /dev/null 2>&1; then
+        echo "[CONFIG] ERROR: JSON syntax invalid in $config_file - falling back to script defaults" >&2
+        return 1
+    fi
+
+    echo "[CONFIG] JSON syntax validated successfully" >&2
+
+    # Helper function to read JSON value with plutil
+    read_json() {
+        local json_path="$1"
+        local default_value="$2"
+        local value=""
+
+        # Use plutil to extract value (native macOS tool, no dependencies)
+        value=$(plutil -extract "$json_path" raw "$config_file" 2>/dev/null || echo "")
+
+        # If extraction failed or empty, use default
+        if [ -z "$value" ]; then
+            echo "$default_value"
+        else
+            echo "$value"
+        fi
+    }
+
+    # Load Core Settings
+    SCRIPT_VERSION=$(read_json "core_settings.SCRIPT_VERSION" "2.0.0")
+    INSTALLER_OS=$(read_json "core_settings.INSTALLER_OS" "15")
+    MAX_DEFERS=$(read_json "core_settings.MAX_DEFERS" "3")
+    FORCE_TIMEOUT_SECONDS=$(read_json "core_settings.FORCE_TIMEOUT_SECONDS" "259200")
+
+    # Load File Paths
+    PLIST=$(read_json "file_paths.PLIST" "/Library/Preferences/com.macjediwizard.eraseinstall.plist")
+    SCRIPT_PATH=$(read_json "file_paths.SCRIPT_PATH" "/Library/Management/erase-install/erase-install.sh")
+    DIALOG_BIN=$(read_json "file_paths.DIALOG_BIN" "/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog")
+    LAUNCHDAEMON_LABEL=$(read_json "file_paths.LAUNCHDAEMON_LABEL" "com.macjediwizard.eraseinstall.schedule")
+    LAUNCHDAEMON_PATH=$(read_json "file_paths.LAUNCHDAEMON_PATH" "/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist")
+
+    # SECURITY: Validate file paths to prevent path traversal
+    if ! validate_path "$PLIST" "/Library/Preferences"; then
+        echo "[CONFIG] WARNING: Invalid PLIST path, using default" >&2
+        PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"
+    fi
+
+    if ! validate_path "$SCRIPT_PATH" "/Library/Management"; then
+        echo "[CONFIG] WARNING: Invalid SCRIPT_PATH, using default" >&2
+        SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"
+    fi
+
+    if ! validate_path "$DIALOG_BIN"; then
+        echo "[CONFIG] WARNING: Invalid DIALOG_BIN path, using default" >&2
+        DIALOG_BIN="/Library/Management/erase-install/Dialog.app/Contents/MacOS/Dialog"
+    fi
+
+    # Validate LaunchDaemon label (should be reverse domain notation)
+    if [[ ! "$LAUNCHDAEMON_LABEL" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+        echo "[CONFIG] WARNING: Invalid LAUNCHDAEMON_LABEL format, using default" >&2
+        LAUNCHDAEMON_LABEL="com.macjediwizard.eraseinstall.schedule"
+    fi
+
+    if ! validate_path "$LAUNCHDAEMON_PATH" "/Library/LaunchDaemons"; then
+        echo "[CONFIG] WARNING: Invalid LAUNCHDAEMON_PATH, using default" >&2
+        LAUNCHDAEMON_PATH="/Library/LaunchDaemons/${LAUNCHDAEMON_LABEL}.plist"
+    fi
+
+    # Fallback for DIALOG_BIN if primary doesn't exist
+    [ ! -x "$DIALOG_BIN" ] && DIALOG_BIN=$(read_json "file_paths.DIALOG_BIN_FALLBACK" "/usr/local/bin/dialog")
+
+    # Load Feature Toggles
+    TEST_MODE=$(read_json "feature_toggles.TEST_MODE" "false")
+    PREVENT_ALL_REBOOTS=$(read_json "feature_toggles.PREVENT_ALL_REBOOTS" "false")
+    SKIP_OS_VERSION_CHECK=$(read_json "feature_toggles.SKIP_OS_VERSION_CHECK" "false")
+    AUTO_INSTALL_DEPENDENCIES=$(read_json "feature_toggles.AUTO_INSTALL_DEPENDENCIES" "true")
+    DEBUG_MODE=$(read_json "feature_toggles.DEBUG_MODE" "false")
+
+    # Load Logging Configuration
+    MAX_LOG_SIZE_MB=$(read_json "logging.MAX_LOG_SIZE_MB" "10")
+    MAX_LOG_FILES=$(read_json "logging.MAX_LOG_FILES" "5")
+
+    # Load Main Dialog Settings
+    DIALOG_TITLE=$(read_json "main_dialog.DIALOG_TITLE" "macOS Upgrade Required")
+    DIALOG_TITLE_TEST_MODE=$(read_json "main_dialog.DIALOG_TITLE_TEST_MODE" "$DIALOG_TITLE\n                (TEST MODE)")
+    DIALOG_MESSAGE=$(read_json "main_dialog.DIALOG_MESSAGE" "Please install macOS ${INSTALLER_OS}. Select an action:")
+    DIALOG_ICON=$(read_json "main_dialog.DIALOG_ICON" "SF=gear,weight=bold,size=128")
+    DIALOG_POSITION=$(read_json "main_dialog.DIALOG_POSITION" "topright")
+    DIALOG_HEIGHT=$(read_json "main_dialog.DIALOG_HEIGHT" "250")
+    DIALOG_WIDTH=$(read_json "main_dialog.DIALOG_WIDTH" "650")
+    DIALOG_MESSAGEFONT=$(read_json "main_dialog.DIALOG_MESSAGEFONT" "size=16")
+    DIALOG_INSTALL_NOW_TEXT=$(read_json "main_dialog.DIALOG_INSTALL_NOW_TEXT" "Install Now")
+    DIALOG_SCHEDULE_TODAY_TEXT=$(read_json "main_dialog.DIALOG_SCHEDULE_TODAY_TEXT" "Schedule Today")
+    DIALOG_DEFER_TEXT=$(read_json "main_dialog.DIALOG_DEFER_TEXT" "Defer 24 Hours")
+    DIALOG_DEFER_TEXT_TEST_MODE=$(read_json "main_dialog.DIALOG_DEFER_TEXT_TEST_MODE" "Defer 5 Minutes   (TEST MODE)")
+    DIALOG_CONFIRM_TEXT=$(read_json "main_dialog.DIALOG_CONFIRM_TEXT" "Confirm")
+
+    # Load Pre-installation Dialog Settings
+    PREINSTALL_TITLE=$(read_json "preinstall_dialog.PREINSTALL_TITLE" "macOS Upgrade Starting")
+    PREINSTALL_TITLE_TEST_MODE=$(read_json "preinstall_dialog.PREINSTALL_TITLE_TEST_MODE" "$PREINSTALL_TITLE\n                (TEST MODE)")
+    PREINSTALL_MESSAGE=$(read_json "preinstall_dialog.PREINSTALL_MESSAGE" "Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds, or click Continue to begin now.")
+    PREINSTALL_PROGRESS_TEXT_MESSAGE=$(read_json "preinstall_dialog.PREINSTALL_PROGRESS_TEXT_MESSAGE" "Installation will begin in 60 seconds...")
+    PREINSTALL_CONTINUE_TEXT=$(read_json "preinstall_dialog.PREINSTALL_CONTINUE_TEXT" "Continue Now")
+    PREINSTALL_COUNTDOWN=$(read_json "preinstall_dialog.PREINSTALL_COUNTDOWN" "60")
+    PREINSTALL_HEIGHT=$(read_json "preinstall_dialog.PREINSTALL_HEIGHT" "350")
+    PREINSTALL_WIDTH=$(read_json "preinstall_dialog.PREINSTALL_WIDTH" "650")
+    PREINSTALL_DIALOG_MESSAGEFONT=$(read_json "preinstall_dialog.PREINSTALL_DIALOG_MESSAGEFONT" "size=16")
+
+    # Load Scheduled Dialog Settings
+    SCHEDULED_TITLE=$(read_json "scheduled_dialog.SCHEDULED_TITLE" "macOS Upgrade Scheduled")
+    SCHEDULED_TITLE_TEST_MODE=$(read_json "scheduled_dialog.SCHEDULED_TITLE_TEST_MODE" "$SCHEDULED_TITLE\n                (TEST MODE)")
+    SCHEDULED_MESSAGE=$(read_json "scheduled_dialog.SCHEDULED_MESSAGE" "Your scheduled macOS upgrade is ready to begin.\n\nThe upgrade will start automatically in 60 seconds,\n\n or click Continue to begin now.")
+    SCHEDULED_PROGRESS_TEXT_MESSAGE=$(read_json "scheduled_dialog.SCHEDULED_PROGRESS_TEXT_MESSAGE" "Installation will begin in 60 seconds.....")
+    SCHEDULED_CONTINUE_TEXT=$(read_json "scheduled_dialog.SCHEDULED_CONTINUE_TEXT" "Continue Now")
+    SCHEDULED_COUNTDOWN=$(read_json "scheduled_dialog.SCHEDULED_COUNTDOWN" "60")
+    SCHEDULED_HEIGHT=$(read_json "scheduled_dialog.SCHEDULED_HEIGHT" "250")
+    SCHEDULED_WIDTH=$(read_json "scheduled_dialog.SCHEDULED_WIDTH" "650")
+    SCHEDULED_CONTINUE_HEIGHT=$(read_json "scheduled_dialog.SCHEDULED_CONTINUE_HEIGHT" "350")
+    SCHEDULED_CONTINUE_WIDTH=$(read_json "scheduled_dialog.SCHEDULED_CONTINUE_WIDTH" "750")
+    SCHEDULED_DIALOG_MESSAGEFONT=$(read_json "scheduled_dialog.SCHEDULED_DIALOG_MESSAGEFONT" "size=16")
+
+    # Load Error Dialog Settings
+    ERROR_DIALOG_TITLE=$(read_json "error_dialog.ERROR_DIALOG_TITLE" "Invalid Time")
+    ERROR_DIALOG_MESSAGE=$(read_json "error_dialog.ERROR_DIALOG_MESSAGE" "The selected time is invalid.\nPlease select a valid time (00:00-23:59).")
+    ERROR_DIALOG_ICON=$(read_json "error_dialog.ERROR_DIALOG_ICON" "SF=exclamationmark.triangle")
+    ERROR_DIALOG_HEIGHT=$(read_json "error_dialog.ERROR_DIALOG_HEIGHT" "350")
+    ERROR_DIALOG_WIDTH=$(read_json "error_dialog.ERROR_DIALOG_WIDTH" "650")
+    ERROR_CONTINUE_TEXT=$(read_json "error_dialog.ERROR_CONTINUE_TEXT" "OK")
+
+    # Load erase-install Options
+    REBOOT_DELAY=$(read_json "erase_install_options.REBOOT_DELAY" "60")
+    REINSTALL=$(read_json "erase_install_options.REINSTALL" "true")
+    NO_FS=$(read_json "erase_install_options.NO_FS" "true")
+    CHECK_POWER=$(read_json "erase_install_options.CHECK_POWER" "true")
+    POWER_WAIT_LIMIT=$(read_json "erase_install_options.POWER_WAIT_LIMIT" "300")
+    MIN_DRIVE_SPACE=$(read_json "erase_install_options.MIN_DRIVE_SPACE" "50")
+    CLEANUP_AFTER_USE=$(read_json "erase_install_options.CLEANUP_AFTER_USE" "true")
+
+    # Load Authentication Notice Settings
+    SHOW_AUTH_NOTICE=$(read_json "auth_notice.SHOW_AUTH_NOTICE" "true")
+    AUTH_NOTICE_TITLE=$(read_json "auth_notice.AUTH_NOTICE_TITLE" "Admin Access Required")
+    AUTH_NOTICE_TITLE_TEST_MODE=$(read_json "auth_notice.AUTH_NOTICE_TITLE_TEST_MODE" "$AUTH_NOTICE_TITLE\n            (TEST MODE)")
+    AUTH_NOTICE_MESSAGE=$(read_json "auth_notice.AUTH_NOTICE_MESSAGE" "You will be prompted for admin credentials to complete the macOS upgrade.\n\nIf you do not have admin access, please use Jamf Connect or Self Service to elevate your permissions before continuing.")
+    AUTH_NOTICE_BUTTON=$(read_json "auth_notice.AUTH_NOTICE_BUTTON" "I'm Ready to Continue")
+    AUTH_NOTICE_TIMEOUT=$(read_json "auth_notice.AUTH_NOTICE_TIMEOUT" "0")
+    AUTH_NOTICE_ICON=$(read_json "auth_notice.AUTH_NOTICE_ICON" "SF=lock.shield")
+    AUTH_NOTICE_HEIGHT=$(read_json "auth_notice.AUTH_NOTICE_HEIGHT" "300")
+    AUTH_NOTICE_WIDTH=$(read_json "auth_notice.AUTH_NOTICE_WIDTH" "750")
+
+    # Load Abort Button Settings
+    ENABLE_ABORT_BUTTON=$(read_json "abort_button.ENABLE_ABORT_BUTTON" "true")
+    ABORT_BUTTON_TEXT=$(read_json "abort_button.ABORT_BUTTON_TEXT" "Abort (Emergency)")
+    ABORT_DEFER_MINUTES=$(read_json "abort_button.ABORT_DEFER_MINUTES" "5")
+    MAX_ABORTS=$(read_json "abort_button.MAX_ABORTS" "3")
+    ABORT_COUNTDOWN=$(read_json "abort_button.ABORT_COUNTDOWN" "15")
+    ABORT_HEIGHT=$(read_json "abort_button.ABORT_HEIGHT" "250")
+    ABORT_WIDTH=$(read_json "abort_button.ABORT_WIDTH" "750")
+    ABORT_ICON=$(read_json "abort_button.ABORT_ICON" "SF=exclamationmark.triangle")
+
+    # SECURITY: Validate all numeric settings
+    local validated_value
+
+    # Core settings
+    validated_value=$(validate_positive_integer "$INSTALLER_OS" "15" "99" "false")
+    if [[ "$validated_value" != "$INSTALLER_OS" ]]; then
+        echo "[CONFIG] WARNING: INSTALLER_OS ($INSTALLER_OS) is invalid, using default: 15" >&2
+        INSTALLER_OS="15"
+    fi
+
+    validated_value=$(validate_positive_integer "$MAX_DEFERS" "3" "100" "true")
+    if [[ "$validated_value" != "$MAX_DEFERS" ]]; then
+        echo "[CONFIG] WARNING: MAX_DEFERS ($MAX_DEFERS) is invalid, using default: 3" >&2
+        MAX_DEFERS="3"
+    fi
+
+    validated_value=$(validate_positive_integer "$MAX_ABORTS" "3" "100" "true")
+    if [[ "$validated_value" != "$MAX_ABORTS" ]]; then
+        echo "[CONFIG] WARNING: MAX_ABORTS ($MAX_ABORTS) is invalid, using default: 3" >&2
+        MAX_ABORTS="3"
+    fi
+
+    validated_value=$(validate_positive_integer "$FORCE_TIMEOUT_SECONDS" "259200" "604800" "false")
+    if [[ "$validated_value" != "$FORCE_TIMEOUT_SECONDS" ]]; then
+        echo "[CONFIG] WARNING: FORCE_TIMEOUT_SECONDS ($FORCE_TIMEOUT_SECONDS) is invalid, using default: 259200" >&2
+        FORCE_TIMEOUT_SECONDS="259200"
+    fi
+
+    # erase-install options
+    validated_value=$(validate_positive_integer "$REBOOT_DELAY" "60" "3600" "true")
+    if [[ "$validated_value" != "$REBOOT_DELAY" ]]; then
+        echo "[CONFIG] WARNING: REBOOT_DELAY ($REBOOT_DELAY) is invalid, using default: 60" >&2
+        REBOOT_DELAY="60"
+    fi
+
+    validated_value=$(validate_positive_integer "$POWER_WAIT_LIMIT" "300" "7200" "true")
+    if [[ "$validated_value" != "$POWER_WAIT_LIMIT" ]]; then
+        echo "[CONFIG] WARNING: POWER_WAIT_LIMIT ($POWER_WAIT_LIMIT) is invalid, using default: 300" >&2
+        POWER_WAIT_LIMIT="300"
+    fi
+
+    validated_value=$(validate_positive_integer "$MIN_DRIVE_SPACE" "50" "500" "false")
+    if [[ "$validated_value" != "$MIN_DRIVE_SPACE" ]]; then
+        echo "[CONFIG] WARNING: MIN_DRIVE_SPACE ($MIN_DRIVE_SPACE) is invalid, using default: 50" >&2
+        MIN_DRIVE_SPACE="50"
+    fi
+
+    # Dialog dimensions and timeouts
+    validated_value=$(validate_positive_integer "$DIALOG_HEIGHT" "250" "2000" "false")
+    [[ "$validated_value" != "$DIALOG_HEIGHT" ]] && DIALOG_HEIGHT="250"
+
+    validated_value=$(validate_positive_integer "$DIALOG_WIDTH" "650" "3000" "false")
+    [[ "$validated_value" != "$DIALOG_WIDTH" ]] && DIALOG_WIDTH="650"
+
+    validated_value=$(validate_positive_integer "$PREINSTALL_COUNTDOWN" "60" "600" "false")
+    [[ "$validated_value" != "$PREINSTALL_COUNTDOWN" ]] && PREINSTALL_COUNTDOWN="60"
+
+    validated_value=$(validate_positive_integer "$SCHEDULED_COUNTDOWN" "60" "600" "false")
+    [[ "$validated_value" != "$SCHEDULED_COUNTDOWN" ]] && SCHEDULED_COUNTDOWN="60"
+
+    validated_value=$(validate_positive_integer "$AUTH_NOTICE_TIMEOUT" "0" "600" "true")
+    [[ "$validated_value" != "$AUTH_NOTICE_TIMEOUT" ]] && AUTH_NOTICE_TIMEOUT="0"
+
+    validated_value=$(validate_positive_integer "$ABORT_COUNTDOWN" "15" "600" "false")
+    [[ "$validated_value" != "$ABORT_COUNTDOWN" ]] && ABORT_COUNTDOWN="15"
+
+    validated_value=$(validate_positive_integer "$ABORT_DEFER_MINUTES" "5" "1440" "false")
+    [[ "$validated_value" != "$ABORT_DEFER_MINUTES" ]] && ABORT_DEFER_MINUTES="5"
+
+    # Logging settings
+    validated_value=$(validate_positive_integer "$MAX_LOG_SIZE_MB" "10" "100" "false")
+    [[ "$validated_value" != "$MAX_LOG_SIZE_MB" ]] && MAX_LOG_SIZE_MB="10"
+
+    validated_value=$(validate_positive_integer "$MAX_LOG_FILES" "5" "50" "false")
+    [[ "$validated_value" != "$MAX_LOG_FILES" ]] && MAX_LOG_FILES="5"
+
+    # Log configuration summary
+    echo "[CONFIG] ========================================" >&2
+    echo "[CONFIG] Configuration loaded from: $config_source" >&2
+    echo "[CONFIG] ========================================" >&2
+    echo "[CONFIG] Core Settings:" >&2
+    echo "[CONFIG]   Target macOS Version: ${INSTALLER_OS}" >&2
+    echo "[CONFIG]   Max Deferrals: ${MAX_DEFERS}" >&2
+    echo "[CONFIG]   Max Aborts: ${MAX_ABORTS}" >&2
+    echo "[CONFIG]   Force Timeout: ${FORCE_TIMEOUT_SECONDS}s ($(($FORCE_TIMEOUT_SECONDS / 3600))h)" >&2
+    echo "[CONFIG] Feature Toggles:" >&2
+    echo "[CONFIG]   Test Mode: ${TEST_MODE}" >&2
+    echo "[CONFIG]   Debug Mode: ${DEBUG_MODE}" >&2
+    echo "[CONFIG]   Skip OS Check: ${SKIP_OS_VERSION_CHECK}" >&2
+    echo "[CONFIG]   Prevent Reboots: ${PREVENT_ALL_REBOOTS}" >&2
+    echo "[CONFIG] ========================================" >&2
+
+    return 0
+}
+
 ########################################################################################################################################################################
 #
 # ---------- Very Early Abort Detection ----------
@@ -532,15 +1001,32 @@ show_auth_notice() {
   
   # Run dialog as user to avoid TCC issues
   local result=1
-  
+
   if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
     log_info "Running pre-auth dialog as user $console_user to avoid TCC permissions issues"
-    
-    # Generate a unique ID for this dialog execution
-    local dialog_id="$(date +%Y%m%d%H%M%S)-$$"
-    local temp_script="/tmp/preauth-dialog-${dialog_id}.sh"
-    local result_file="/tmp/dialog-result-${dialog_id}.txt"
-    
+
+    # SECURITY FIX: Use mktemp for secure temporary files
+    local temp_script
+    local result_file
+    local exec_log
+    temp_script=$(create_secure_temp "preauth-dialog" ".sh") || {
+        log_error "Failed to create secure temporary script file"
+        return 1
+    }
+    result_file=$(create_secure_temp "dialog-result" ".txt") || {
+        rm -f "$temp_script"
+        log_error "Failed to create secure result file"
+        return 1
+    }
+    exec_log=$(create_secure_temp "dialog-exec" ".log") || {
+        rm -f "$temp_script" "$result_file"
+        log_error "Failed to create secure exec log file"
+        return 1
+    }
+
+    # Setup cleanup trap for these temp files
+    trap 'rm -f "$temp_script" "$result_file" "$exec_log"' RETURN
+
     cat > "$temp_script" << 'EOFSCRIPT'
 #!/bin/bash
 export DISPLAY=:0
@@ -573,18 +1059,28 @@ echo "DIALOG_EXIT_CODE:$DIALOG_RESULT" > "RESULT_FILE_PLACEHOLDER"
 exit 0
 EOFSCRIPT
     
-    # Replace placeholders with actual values
-    sed -i '' "s|CONSOLE_USER_PLACEHOLDER|$console_user|g" "$temp_script"
-    sed -i '' "s|DIALOG_BIN_PLACEHOLDER|$DIALOG_BIN|g" "$temp_script"
-    sed -i '' "s|DISPLAY_TITLE_PLACEHOLDER|$display_title|g" "$temp_script"
-    sed -i '' "s|AUTH_NOTICE_MESSAGE_PLACEHOLDER|$AUTH_NOTICE_MESSAGE|g" "$temp_script"
-    sed -i '' "s|AUTH_NOTICE_BUTTON_PLACEHOLDER|$AUTH_NOTICE_BUTTON|g" "$temp_script"
-    sed -i '' "s|AUTH_NOTICE_ICON_PLACEHOLDER|$AUTH_NOTICE_ICON|g" "$temp_script"
+    # SECURITY FIX: Replace placeholders with escaped values to prevent sed injection
+    local console_user_escaped=$(escape_sed "$console_user")
+    local dialog_bin_escaped=$(escape_sed "$DIALOG_BIN")
+    local display_title_escaped=$(escape_sed "$display_title")
+    local auth_notice_message_escaped=$(escape_sed "$AUTH_NOTICE_MESSAGE")
+    local auth_notice_button_escaped=$(escape_sed "$AUTH_NOTICE_BUTTON")
+    local auth_notice_icon_escaped=$(escape_sed "$AUTH_NOTICE_ICON")
+    local dialog_position_escaped=$(escape_sed "$DIALOG_POSITION")
+    local timeout_args_escaped=$(escape_sed "$timeout_args")
+    local result_file_escaped=$(escape_sed "$result_file")
+
+    sed -i '' "s|CONSOLE_USER_PLACEHOLDER|$console_user_escaped|g" "$temp_script"
+    sed -i '' "s|DIALOG_BIN_PLACEHOLDER|$dialog_bin_escaped|g" "$temp_script"
+    sed -i '' "s|DISPLAY_TITLE_PLACEHOLDER|$display_title_escaped|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_MESSAGE_PLACEHOLDER|$auth_notice_message_escaped|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_BUTTON_PLACEHOLDER|$auth_notice_button_escaped|g" "$temp_script"
+    sed -i '' "s|AUTH_NOTICE_ICON_PLACEHOLDER|$auth_notice_icon_escaped|g" "$temp_script"
     sed -i '' "s|AUTH_NOTICE_HEIGHT_PLACEHOLDER|$AUTH_NOTICE_HEIGHT|g" "$temp_script"
     sed -i '' "s|AUTH_NOTICE_WIDTH_PLACEHOLDER|$AUTH_NOTICE_WIDTH|g" "$temp_script"
-    sed -i '' "s|DIALOG_POSITION_PLACEHOLDER|$DIALOG_POSITION|g" "$temp_script"
-    sed -i '' "s|TIMEOUT_ARGS_PLACEHOLDER|$timeout_args|g" "$temp_script"
-    sed -i '' "s|RESULT_FILE_PLACEHOLDER|$result_file|g" "$temp_script"
+    sed -i '' "s|DIALOG_POSITION_PLACEHOLDER|$dialog_position_escaped|g" "$temp_script"
+    sed -i '' "s|TIMEOUT_ARGS_PLACEHOLDER|$timeout_args_escaped|g" "$temp_script"
+    sed -i '' "s|RESULT_FILE_PLACEHOLDER|$result_file_escaped|g" "$temp_script"
     
     # After the sed replacements, add:
     log_debug "Generated temp script content:"
@@ -605,7 +1101,7 @@ EOFSCRIPT
     log_debug "Executing temp script as user $console_user"
     
     # Method 1: Direct sudo execution (most reliable)
-    sudo -u "$console_user" bash "$temp_script" > /tmp/dialog-exec-${dialog_id}.log 2>&1 &
+    sudo -u "$console_user" bash "$temp_script" > "$exec_log" 2>&1 &
     local script_pid=$!
     
     log_debug "Started script process with PID: $script_pid"
@@ -4437,35 +4933,35 @@ sleep 0.5
 log_message "Pre-authentication notice completed, proceeding with installation"
 fi
 
-# Build command arguments properly - FIX FOR THE EMPTY COMMAND ISSUE
-CMD="$ERASE_INSTALL_PATH"
+# Build command arguments properly using array (SECURITY FIX: prevents command injection)
+declare -a cmd_args=("$ERASE_INSTALL_PATH")
 
 # Add reinstall parameter
 if [[ "$REINSTALL" == "true" ]]; then
 log_message "Mode: Reinstall (not erase-install)"
-CMD="$CMD --reinstall"
+cmd_args+=(--reinstall)
 fi
 
 # Add reboot delay if specified
 if [ "$REBOOT_DELAY" -gt 0 ]; then
 log_message "Using reboot delay: $REBOOT_DELAY seconds"
-CMD="$CMD --rebootdelay $REBOOT_DELAY"
+cmd_args+=(--rebootdelay "$REBOOT_DELAY")
 fi
 
 # Add no filesystem option if enabled
 if [ "$NO_FS" = true ]; then
 log_message "File system check disabled (--no-fs)"
-CMD="$CMD --no-fs"
+cmd_args+=(--no-fs)
 fi
 
 # Add power check and wait limit if enabled
 if [ "$CHECK_POWER" = true ]; then
 log_message "Power check enabled: erase-install will verify power connection"
-CMD="$CMD --check-power"
+cmd_args+=(--check-power)
 
 if [ "$POWER_WAIT_LIMIT" -gt 0 ]; then
 log_message "Power wait limit set to $POWER_WAIT_LIMIT seconds"
-CMD="$CMD --power-wait-limit $POWER_WAIT_LIMIT"
+cmd_args+=(--power-wait-limit "$POWER_WAIT_LIMIT")
 else
 log_message "Using default power wait limit (60 seconds)"
 fi
@@ -4475,77 +4971,78 @@ fi
 
 # Add minimum drive space
 log_message "Minimum drive space: $MIN_DRIVE_SPACE GB"
-CMD="$CMD --min-drive-space $MIN_DRIVE_SPACE"
+cmd_args+=(--min-drive-space "$MIN_DRIVE_SPACE")
 
 # Add cleanup option if enabled
 if [ "$CLEANUP_AFTER_USE" = true ]; then
 log_message "Cleanup after use enabled"
-CMD="$CMD --cleanup-after-use"
+cmd_args+=(--cleanup-after-use)
 fi
 
 # Add test mode if enabled
 if [[ $TEST_MODE == true ]]; then
 log_message "Test mode enabled"
-CMD="$CMD --test-run"
+cmd_args+=(--test-run)
 fi
 
 # Add verbose logging if debug mode enabled
 if [ "$DEBUG_MODE" = true ]; then
 log_message "Verbose logging enabled for erase-install"
-CMD="$CMD --verbose"
+cmd_args+=(--verbose)
 fi
 
 # Specify target OS version to use cached installer or download specific version
 if [ -n "$INSTALLER_OS" ]; then
 log_message "Specifying target OS version: $INSTALLER_OS (will use cached installer if available)"
-CMD="$CMD --os $INSTALLER_OS"
+cmd_args+=(--os "$INSTALLER_OS")
 fi
-
-# Log command before no-reboot check
-log_message "Command before no-reboot check: $CMD"
 
 # Add no-reboot override if enabled (highest safety priority)
 # This should be last to override any other reboot settings
 if [ "$PREVENT_ALL_REBOOTS" = "true" ]; then
 log_message "SAFETY FEATURE: --no-reboot flag added to prevent any reboots"
-CMD="$CMD --no-reboot"
-log_message "VERIFIED: Final command with --no-reboot: $CMD"
+cmd_args+=(--no-reboot)
 elif [ "$TEST_MODE" = "true" ]; then
 # Double safety check - always add no-reboot in test mode regardless of PREVENT_ALL_REBOOTS
 log_message "SAFETY FEATURE: Adding --no-reboot flag because test mode is enabled"
-CMD="$CMD --no-reboot"
-log_message "VERIFIED: Final command with --no-reboot (test mode): $CMD"
+cmd_args+=(--no-reboot)
 fi
 
 # Safety check to verify test mode flag is correctly passed
-if [ "$TEST_MODE" = "true" ] && [[ "$CMD" != *"--test-run"* ]]; then
+has_test_run=false
+has_no_reboot=false
+for arg in "${cmd_args[@]}"; do
+    [[ "$arg" == "--test-run" ]] && has_test_run=true
+    [[ "$arg" == "--no-reboot" ]] && has_no_reboot=true
+done
+
+if [ "$TEST_MODE" = "true" ] && [ "$has_test_run" = false ]; then
 log_message "CRITICAL SAFETY CHECK FAILED: Test mode enabled but --test-run missing from command"
-log_message "Command was: $CMD"
+log_message "Command args: ${cmd_args[*]}"
 log_message "Aborting installation to prevent unintended reboot"
 exit 1
 fi
 
 # Execute the command with proper error handling
-log_message "Command about to execute: $CMD"
+log_message "Command about to execute: ${cmd_args[*]}"
 log_message "PREVENT_ALL_REBOOTS value: $PREVENT_ALL_REBOOTS"
 log_message "TEST_MODE value: $TEST_MODE"
 
 # Critical safety check - absolutely prevent reboots in test mode
-if [[ "$TEST_MODE" = "true" && "$CMD" != *"--no-reboot"* ]]; then
+if [ "$TEST_MODE" = "true" ] && [ "$has_no_reboot" = false ]; then
 log_message "CRITICAL SAFETY FAILURE: Test mode enabled but --no-reboot missing from command"
 log_message "Adding --no-reboot as emergency safety measure"
-CMD="$CMD --no-reboot"
-log_message "Modified command: $CMD"
+cmd_args+=(--no-reboot)
 fi
 
 # Final verification - log full command
-log_message "FINAL COMMAND TO EXECUTE: $CMD"
+log_message "FINAL COMMAND TO EXECUTE: ${cmd_args[*]}"
 
 # Add PATH to ensure binary can be found
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-# Execute the command
-eval "$CMD"
+# Execute the command using array expansion (SECURITY: prevents command injection)
+"${cmd_args[@]}"
 
 # Save exit code with enhanced error handling
 RESULT=$?
@@ -6563,9 +7060,111 @@ is_running_from_relaunch_daemon() {
   return 1
 }
 
+# ========================================
+# Command-line Argument Processing (v2.0)
+# ========================================
+
+# Parse command-line arguments before initialization
+CUSTOM_CONFIG_PATH=""
+SHOW_CONFIG_ONLY=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --config=*)
+      CUSTOM_CONFIG_PATH="${arg#*=}"
+      ;;
+    --show-config)
+      SHOW_CONFIG_ONLY=true
+      ;;
+    --test-os-check)
+      SKIP_OS_VERSION_CHECK=true
+      ;;
+    --version)
+      echo "erase-install-defer-wrapper v${SCRIPT_VERSION}"
+      echo "JSON Configuration Management for macOS Upgrade Automation"
+      echo ""
+      echo "GitHub: https://github.com/MacJediWizard/Jamf-Silent-macOS-Upgrade-Scheduler"
+      echo "Made with ❤️ by MacJediWizard Consulting, Inc."
+      exit 0
+      ;;
+    --help|-h)
+      echo "erase-install-defer-wrapper v${SCRIPT_VERSION}"
+      echo "JSON Configuration Management for macOS Upgrade Automation"
+      echo ""
+      echo "Usage: $0 [OPTIONS]"
+      echo ""
+      echo "Options:"
+      echo "  --show-config              Display current configuration and exit"
+      echo "  --config=/path/to/file     Use custom JSON configuration file"
+      echo "  --test-os-check            Skip OS version check (for testing)"
+      echo "  --version                  Display version information and exit"
+      echo "  --help, -h                 Display this help message and exit"
+      echo ""
+      echo "Configuration Priority (Highest to Lowest):"
+      echo "  1. Custom JSON (--config parameter)"
+      echo "  2. Managed JSON (/Library/Managed Preferences/...)"
+      echo "  3. Local JSON (/Library/Preferences/...)"
+      echo "  4. Script Defaults"
+      echo ""
+      echo "Examples:"
+      echo "  $0 --show-config"
+      echo "  $0 --config=/tmp/test-config.json"
+      echo "  $0 --config=/tmp/qa.json --test-os-check"
+      echo ""
+      echo "Documentation: https://github.com/MacJediWizard/Jamf-Silent-macOS-Upgrade-Scheduler"
+      exit 0
+      ;;
+  esac
+done
+
 # Main script execution for non-scheduled mode
 init_logging
+
+# Load JSON configuration (v2.0) - overrides User Configuration Section if JSON exists
+load_json_config
+
 log_info "Starting erase-install wrapper script v${SCRIPT_VERSION}"
+log_info "Configuration source: $([ -f "/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Managed JSON (Jamf)" || [ -f "/Library/Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Local JSON" || echo "Script Defaults")"
+
+# Handle --show-config command
+if [[ "$SHOW_CONFIG_ONLY" == "true" ]]; then
+  echo ""
+  echo "=== Current Configuration ==="
+  echo "Configuration Source: $([ -f "/Library/Managed Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Managed JSON (Jamf)" || [ -f "/Library/Preferences/com.macjediwizard.eraseinstall.config.json" ] && echo "Local JSON" || echo "Script Defaults")"
+  echo ""
+  echo "Core Settings:"
+  echo "  SCRIPT_VERSION: ${SCRIPT_VERSION}"
+  echo "  INSTALLER_OS: ${INSTALLER_OS}"
+  echo "  MAX_DEFERS: ${MAX_DEFERS}"
+  echo "  MAX_ABORTS: ${MAX_ABORTS}"
+  echo "  FORCE_TIMEOUT_SECONDS: ${FORCE_TIMEOUT_SECONDS}"
+  echo ""
+  echo "Feature Toggles:"
+  echo "  TEST_MODE: ${TEST_MODE}"
+  echo "  PREVENT_ALL_REBOOTS: ${PREVENT_ALL_REBOOTS}"
+  echo "  SKIP_OS_VERSION_CHECK: ${SKIP_OS_VERSION_CHECK}"
+  echo "  AUTO_INSTALL_DEPENDENCIES: ${AUTO_INSTALL_DEPENDENCIES}"
+  echo "  DEBUG_MODE: ${DEBUG_MODE}"
+  echo ""
+  echo "File Paths:"
+  echo "  SCRIPT_PATH: ${SCRIPT_PATH}"
+  echo "  DIALOG_BIN: ${DIALOG_BIN}"
+  echo "  PLIST: ${PLIST}"
+  echo ""
+  echo "Dialog Settings:"
+  echo "  DIALOG_TITLE: ${DIALOG_TITLE}"
+  echo "  DIALOG_POSITION: ${DIALOG_POSITION}"
+  echo "  DIALOG_ICON: ${DIALOG_ICON}"
+  echo ""
+  echo "erase-install Options:"
+  echo "  REINSTALL: ${REINSTALL}"
+  echo "  CHECK_POWER: ${CHECK_POWER}"
+  echo "  POWER_WAIT_LIMIT: ${POWER_WAIT_LIMIT}"
+  echo "  MIN_DRIVE_SPACE: ${MIN_DRIVE_SPACE}"
+  echo ""
+  exit 0
+fi
+
 log_system_info
 
 # Detect if running from abort daemon
@@ -6639,15 +7238,6 @@ if [[ -z "$CAN_DEFER" ]]; then
 fi
 
 log_debug "State variables initialized: DEFER_COUNT=$CURRENT_DEFER_COUNT, FORCE_INSTALL=$FORCE_INSTALL, CAN_DEFER=$CAN_DEFER"
-
-# TEMPORARY DEBUG BLOCK - REMOVE AFTER TESTING
-log_info "=== STATE VERIFICATION TEST ==="
-log_info "CURRENT_DEFER_COUNT: ${CURRENT_DEFER_COUNT:-UNDEFINED}"
-log_info "CURRENT_ABORT_COUNT: ${CURRENT_ABORT_COUNT:-UNDEFINED}" 
-log_info "FORCE_INSTALL: ${FORCE_INSTALL:-UNDEFINED}"
-log_info "CAN_DEFER: ${CAN_DEFER:-UNDEFINED}"
-log_info "CAN_ABORT: ${CAN_ABORT:-UNDEFINED}"
-log_info "=== END STATE VERIFICATION ==="
 
 # Check if system is already running the target OS version
 log_info "Performing early OS version check..."

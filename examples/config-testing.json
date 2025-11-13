@@ -1,0 +1,51 @@
+{
+  "core_settings": {
+    "INSTALLER_OS": "15",
+    "MAX_DEFERS": 99,
+    "MAX_ABORTS": 99,
+    "FORCE_TIMEOUT_SECONDS": 2592000
+  },
+
+  "feature_toggles": {
+    "TEST_MODE": true,
+    "DEBUG_MODE": true,
+    "PREVENT_ALL_REBOOTS": true,
+    "SKIP_OS_VERSION_CHECK": true,
+    "AUTO_INSTALL_DEPENDENCIES": true
+  },
+
+  "main_dialog": {
+    "DIALOG_TITLE": "[QA TEST] macOS Upgrade",
+    "DIALOG_MESSAGE": "This is a TEST deployment. Select an action to test the workflow:",
+    "DIALOG_POSITION": "center",
+    "DIALOG_HEIGHT": "250",
+    "DIALOG_WIDTH": "700"
+  },
+
+  "auth_notice": {
+    "SHOW_AUTH_NOTICE": true,
+    "AUTH_NOTICE_TITLE": "[TEST MODE] Admin Access Required",
+    "AUTH_NOTICE_MESSAGE": "QA Testing: You will be prompted for admin credentials.\n\nThis is a test environment - no actual upgrade will occur.",
+    "AUTH_NOTICE_TIMEOUT": 0
+  },
+
+  "abort_button": {
+    "ENABLE_ABORT_BUTTON": true,
+    "ABORT_BUTTON_TEXT": "[TEST] Abort",
+    "MAX_ABORTS": 99
+  },
+
+  "erase_install_options": {
+    "REBOOT_DELAY": 5,
+    "REINSTALL": true,
+    "NO_FS": true,
+    "CHECK_POWER": false,
+    "MIN_DRIVE_SPACE": 20,
+    "CLEANUP_AFTER_USE": false
+  },
+
+  "logging": {
+    "MAX_LOG_SIZE_MB": 50,
+    "MAX_LOG_FILES": 10
+  }
+}
