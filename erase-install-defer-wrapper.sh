@@ -970,12 +970,9 @@ show_auth_notice() {
   # Enhanced console user detection for LaunchDaemon context
   local console_user=""
   local console_uid=""
-  
-  # Multiple detection methods for reliability
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
-  [ -z "$console_user" ] && console_user=$(ls -l /dev/console | awk '{print $3}')
+
+  # Use centralized console user detection function
+  console_user=$(get_console_user)
   
   # Get UID with validation
   if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
@@ -3182,9 +3179,7 @@ create_scheduled_launchdaemon() {
   
   # Get console user for UI references
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  console_user=$(get_console_user)
   
   # 1. Create the LaunchAgent for UI display
   local agent_label="${LAUNCHDAEMON_LABEL}.ui.${run_id}"
@@ -5542,27 +5537,10 @@ kill_lingering_watchdogs() {
 ########################################################################################################################################################################
 run_erase_install() {
   log_info "Starting user detection for run_erase_install"
-  
+
   # Get current console user for UI display - enhanced for robustness
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  log_debug "Detection method 1 result: '$console_user'"
-  
-  if [ -z "$console_user" ]; then
-    console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-    log_debug "Detection method 2 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ]; then
-    console_user=$(ls -l /dev/console | awk '{print $3}')
-    log_debug "Detection method 3 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
-    console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
-    log_debug "Detection method 4 result: '$console_user'"
-  fi
-  [ -z "$console_user" ] && console_user="$SUDO_USER" && log_debug "Using SUDO_USER: '$console_user'"
-  [ -z "$console_user" ] && console_user="$(id -un)" && log_debug "Using current user: '$console_user'"
-  
+  console_user=$(get_console_user)
   log_info "Detected console user: '$console_user'"
   local console_uid
   console_uid=$(id -u "$console_user")
@@ -6106,12 +6084,10 @@ validate_time() {
 
 show_prompt() {
   log_info "Displaying SwiftDialog dropdown prompt."
-  
+
   # Get console user for proper UI handling
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  console_user=$(get_console_user)
   local console_uid
   console_uid=$(id -u "$console_user" 2>/dev/null || echo "0")
   
@@ -6784,27 +6760,10 @@ if [[ "$1" == "--scheduled" ]]; then
   init_plist
   
   log_info "Starting user detection for scheduled run"
-  
+
   # Get current console user info for UI display - enhanced for robustness
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  log_debug "Detection method 1 result: '$console_user'"
-  
-  if [ -z "$console_user" ]; then
-    console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-    log_debug "Detection method 2 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ]; then
-    console_user=$(ls -l /dev/console | awk '{print $3}')
-    log_debug "Detection method 3 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
-    console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
-    log_debug "Detection method 4 result: '$console_user'"
-  fi
-  [ -z "$console_user" ] && console_user="$SUDO_USER" && log_debug "Using SUDO_USER: '$console_user'"
-  [ -z "$console_user" ] && console_user="$(id -un)" && log_debug "Using current user: '$console_user'"
-  
+  console_user=$(get_console_user)
   log_info "Detected console user: '$console_user'"
   local console_uid
   console_uid=$(id -u "$console_user")
@@ -7250,9 +7209,7 @@ elif check_os_already_updated; then
   
   # Show a notification to the user
   console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  console_user=$(get_console_user)
   
   if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
     console_uid=""
