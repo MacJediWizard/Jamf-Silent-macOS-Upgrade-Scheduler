@@ -32,6 +32,18 @@
     "MAX_LOG_FILES": 5
   },
 
+  "branding": {
+    "ENABLE_BRANDING": false,
+    "COMPANY_NAME": "Your Company Name",
+    "COMPANY_LOGO": "/Library/Management/branding/logo.png",
+    "SUPPORT_CONTACT": "IT Support: support@company.com or ext. 1234",
+    "SHOW_COMPANY_NAME_IN_TITLE": true,
+    "SHOW_SUPPORT_IN_MESSAGE": true,
+    "USE_COMPANY_LOGO": true,
+    "LOGO_WIDTH": 128,
+    "LOGO_HEIGHT": 128
+  },
+
   "main_dialog": {
     "DIALOG_TITLE": "macOS Upgrade Required",
     "DIALOG_TITLE_TEST_MODE": "macOS Upgrade Required\n                (TEST MODE)",
