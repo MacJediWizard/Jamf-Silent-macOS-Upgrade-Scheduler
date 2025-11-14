@@ -1,5 +1,32 @@
 #!/bin/bash
 
+# Strict error handling for production reliability
+# Exit on errors, undefined variables, and pipeline failures
+set -euo pipefail
+
+# Error trap for debugging
+error_handler() {
+    local line_number=$1
+    local bash_lineno=$2
+    local command="$3"
+    local error_code=$4
+
+    echo "[CRITICAL ERROR] Script failed at line ${line_number} (in function called from line ${bash_lineno})" >&2
+    echo "[CRITICAL ERROR] Command: ${command}" >&2
+    echo "[CRITICAL ERROR] Exit code: ${error_code}" >&2
+    echo "[CRITICAL ERROR] Please check logs at: ${WRAPPER_LOG:-/var/log/erase-install-wrapper.log}" >&2
+
+    # Cleanup on error if possible
+    if declare -f cleanup_on_error >/dev/null 2>&1; then
+        cleanup_on_error || true
+    fi
+
+    exit "${error_code}"
+}
+
+# Set error trap
+trap 'error_handler ${LINENO} ${BASH_LINENO} "$BASH_COMMAND" $?' ERR
+
 #######################################################################################################################################################################
 #
 # MacJediWizard Consulting, Inc.
