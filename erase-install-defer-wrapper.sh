@@ -470,6 +470,33 @@ create_secure_temp() {
 }
 
 #######################################
+# SECURITY: Create secure temporary directory with mktemp
+# Arguments:
+#   $1 - Template name (e.g., "download-pkg")
+# Returns:
+#   Path to created temp directory
+#######################################
+create_secure_temp_dir() {
+    local template="$1"
+    local temp_dir
+
+    # Create temp directory with secure template
+    temp_dir=$(mktemp -d "/tmp/${template}.XXXXXXXXXX") || {
+        echo "[ERROR] Failed to create secure temporary directory" >&2
+        return 1
+    }
+
+    # Set restrictive permissions immediately (700 - owner only)
+    chmod 700 "$temp_dir" || {
+        rm -rf "$temp_dir"
+        echo "[ERROR] Failed to set permissions on temporary directory" >&2
+        return 1
+    }
+
+    echo "$temp_dir"
+}
+
+#######################################
 # Apply branding to dialog parameters
 # Arguments:
 #   $1 - Dialog title
@@ -981,9 +1008,11 @@ init_logging() {
     fi
   }
   
-  # Set appropriate permissions
+  # SECURITY FIX (Issue #30): Set restrictive permissions to prevent information disclosure
+  # Log files contain sensitive configuration and timing information
   if [[ -f "${WRAPPER_LOG}" ]]; then
-    chmod 644 "${WRAPPER_LOG}" 2>/dev/null
+    chmod 600 "${WRAPPER_LOG}" 2>/dev/null
+    chown root:wheel "${WRAPPER_LOG}" 2>/dev/null
     # Make parent directory writable by all users if needed
     if [[ "${LOG_DIR}" == "/Users/Shared" ]]; then
       chmod 777 "${LOG_DIR}" 2>/dev/null
@@ -1427,13 +1456,13 @@ install_erase_install() {
   trap 'log_info "Exiting install_erase_install function at line $LINENO"' RETURN
   
   log_info "BEGIN install_erase_install function"
-  
-  # Create a temporary directory
-  local tmp; tmp=$(mktemp -d)
-  if [[ ! -d "${tmp}" ]]; then
-    log_error "Failed to create temporary directory for download."
+
+  # SECURITY FIX (Issue #23): Use create_secure_temp_dir() instead of raw mktemp
+  local tmp
+  tmp=$(create_secure_temp_dir "erase-install-download") || {
+    log_error "Failed to create secure temporary directory for download."
     return 1
-  fi
+  }
   
   log_info "Created temporary directory: ${tmp}"
   
@@ -2421,9 +2450,11 @@ EOF
     
     # Validate and copy to final location
     if plutil -lint "$temp_plist" >/dev/null 2>&1; then
-      cp "$temp_plist" "${PLIST}" && chmod 644 "${PLIST}"
+      # SECURITY FIX (Issue #24): Use restrictive permissions (600) to prevent information disclosure
+      # Plist contains sensitive timing and deferral state that should only be readable by root
+      cp "$temp_plist" "${PLIST}" && chmod 600 "${PLIST}" && chown root:wheel "${PLIST}"
       rm -f "$temp_plist"
-      log_info "Successfully created and validated plist"
+      log_info "Successfully created and validated plist with secure permissions (600)"
     else
       log_error "Generated plist failed validation, using defaults commands"
       rm -f "$temp_plist"
@@ -6910,9 +6941,12 @@ if [[ "$1" == "--scheduled" ]]; then
     end tell
   " 2>&1 | log_debug "AppleScript result: $(cat -)" || log_debug "AppleScript notification failed"
   
-  # Create a temporary script for dialog display
+  # SECURITY FIX (Issue #23): Create temporary script for dialog display using secure temp dir
   log_debug "Creating temporary script for dialog display"
-  TMP_DIR=$(mktemp -d)
+  TMP_DIR=$(create_secure_temp_dir "scheduled-dialog") || {
+    log_error "Failed to create secure temp directory for dialog script"
+    return 1
+  }
   TMP_DIALOG_SCRIPT="$TMP_DIR/dialog_display.sh"
   
   # Create the script with all variables expanded now
