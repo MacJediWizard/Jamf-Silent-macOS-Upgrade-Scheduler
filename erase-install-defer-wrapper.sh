@@ -413,29 +413,60 @@ validate_path() {
     local path="$1"
     local expected_prefix="${2:-}"
 
-    # Check for path traversal sequences
-    if [[ "$path" == *".."* ]]; then
+    # SECURITY FIX (Issue #27): Check for symbolic links
+    if [[ -L "$path" ]]; then
+        echo "[ERROR] Symbolic links not allowed: $path" >&2
+        return 1
+    fi
+
+    # SECURITY FIX (Issue #27): Check for path traversal (including URL-encoded)
+    if [[ "$path" == *".."* ]] || [[ "$path" == *"%2e"* ]] || [[ "$path" == *"%2E"* ]]; then
         echo "[ERROR] Path traversal detected in: $path" >&2
         return 1
     fi
 
-    # If expected prefix provided, validate
-    if [[ -n "$expected_prefix" ]]; then
-        # Get absolute path if it exists
-        if [[ -e "$path" ]]; then
-            local resolved_path
-            resolved_path=$(cd "$(dirname "$path")" && pwd)/$(basename "$path") 2>/dev/null || echo "$path"
-            if [[ ! "$resolved_path" == "$expected_prefix"* ]]; then
-                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
-                return 1
-            fi
-        else
-            # For non-existent paths, just check the string
-            if [[ ! "$path" == "$expected_prefix"* ]]; then
-                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
-                return 1
-            fi
+    # SECURITY FIX (Issue #27): Use realpath for canonical resolution
+    local canonical_path=""
+    if [[ -e "$path" ]]; then
+        # Use perl for canonical path (realpath not always available)
+        canonical_path=$(perl -MCwd -e 'print Cwd::abs_path shift' "$path" 2>/dev/null)
+        if [[ -z "$canonical_path" ]]; then
+            echo "[ERROR] Cannot resolve canonical path: $path" >&2
+            return 1
         fi
+
+        # Verify no symlinks in path hierarchy
+        local check_path="$canonical_path"
+        while [[ "$check_path" != "/" ]]; do
+            if [[ -L "$check_path" ]]; then
+                echo "[ERROR] Symlink in path hierarchy: $check_path" >&2
+                return 1
+            fi
+            check_path=$(dirname "$check_path")
+        done
+    else
+        canonical_path="$path"
+    fi
+
+    # Validate against expected prefix
+    if [[ -n "$expected_prefix" ]]; then
+        local canonical_prefix
+        if [[ -e "$expected_prefix" ]]; then
+            canonical_prefix=$(perl -MCwd -e 'print Cwd::abs_path shift' "$expected_prefix" 2>/dev/null)
+        else
+            canonical_prefix="$expected_prefix"
+        fi
+
+        if [[ ! "$canonical_path" == "$canonical_prefix"* ]]; then
+            echo "[ERROR] Path outside allowed directory: $canonical_path" >&2
+            return 1
+        fi
+    fi
+
+    # Check for null bytes
+    if [[ "$path" == *$'\0'* ]]; then
+        echo "[ERROR] Null byte detected in path" >&2
+        return 1
     fi
 
     return 0
@@ -611,6 +642,71 @@ install_daemon_secure() {
     fi
 
     log_info "Daemon installed securely: $dest_path"
+    return 0
+}
+
+#######################################
+# SECURITY: Safely terminate processes with graceful shutdown
+# Arguments:
+#   $1 - Process pattern to match (for pgrep)
+#   $2 - Timeout in seconds (optional, default 5)
+# Returns:
+#   0 if processes terminated, 1 if error
+#######################################
+kill_process_safely() {
+    local process_pattern="$1"
+    local timeout="${2:-5}"
+
+    # SECURITY FIX (Issue #29): Use pgrep instead of ps|grep|awk
+    local pids
+    pids=$(pgrep -f "$process_pattern" 2>/dev/null) || return 0
+
+    if [[ -z "$pids" ]]; then
+        return 0
+    fi
+
+    log_info "Found processes matching '$process_pattern': $pids"
+
+    # Send SIGTERM for graceful shutdown
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            log_info "Sending SIGTERM to PID $pid for graceful shutdown"
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for graceful termination
+    local waited=0
+    while [[ $waited -lt $timeout ]]; do
+        pids=$(pgrep -f "$process_pattern" 2>/dev/null)
+        if [[ -z "$pids" ]]; then
+            log_info "Processes terminated gracefully"
+            return 0
+        fi
+        sleep 1
+        ((waited++))
+    done
+
+    # Force kill if still running after timeout
+    pids=$(pgrep -f "$process_pattern" 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+        log_warn "Processes did not terminate gracefully, sending SIGKILL to: $pids"
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+
+        # Final verification
+        sleep 1
+        pids=$(pgrep -f "$process_pattern" 2>/dev/null)
+        if [[ -n "$pids" ]]; then
+            log_error "Failed to terminate processes: $pids"
+            return 1
+        fi
+    fi
+
+    log_info "All matching processes terminated"
     return 0
 }
 
@@ -4206,7 +4302,8 @@ log_message "Stopping running erase-install processes" | tee -a "${cleanup_log}"
 pkill -TERM -f "erase-install.sh" 2>/dev/null || true
 sleep 1
 # Force kill if still running
-pkill -9 -f "erase-install.sh" 2>/dev/null || true
+# SECURITY FIX (Issue #29): Use safe process termination
+kill_process_safely "erase-install.sh" 5 || true
 fi
 
 # Unload LaunchAgent if it exists and we have a console user
@@ -5625,10 +5722,9 @@ emergency_daemon_cleanup() {
     log_info "Emergency cleanup: forcibly removing startosinstall daemon"
     
     # Kill any related process
-    for pid in $(ps -ef | grep -i '[s]tartosinstall' | awk '{print $2}'); do
-      log_info "Killing startosinstall process: $pid"
-      kill -9 $pid 2>/dev/null
-    done
+    # SECURITY FIX (Issue #29): Use safe process termination
+    log_info "Attempting to terminate startosinstall processes..."
+    kill_process_safely "startosinstall" 10  # 10 second timeout for system process
     
     # Forcibly unload and remove
     launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
