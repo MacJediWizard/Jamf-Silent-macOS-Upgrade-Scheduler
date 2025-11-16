@@ -1528,116 +1528,117 @@ EOFSCRIPT
 
 # ---------------- Locking Functions ----------------
 
-# Function to acquire a lock with improved atomicity
+# Function to acquire a lock using flock for atomic operations
+# SECURITY FIX: Issue #28 - Eliminates TOCTOU race conditions
 acquire_lock() {
   local lock_path="$1"
   local lock_timeout="${2:-60}"  # Default timeout of 60 seconds
   local force_break="${3:-false}" # Parameter to force break locks
-  
+
   local start_time=$(date +%s)
   local end_time=$((start_time + lock_timeout))
   local current_time
-  
+  local lock_fd=200  # Use file descriptor 200 for locking
+
   # Create lock directory if it doesn't exist
   mkdir -p "$(dirname "$lock_path")" 2>/dev/null
-  
+
   log_debug "Attempting to acquire lock: $lock_path (timeout: ${lock_timeout}s, force_break: ${force_break})"
-  
-  # If force break is enabled, just remove any existing locks
+
+  # If force break is enabled, remove any existing locks
   if [ "$force_break" = "true" ]; then
-    log_warn "Force-break enabled. Removing lock file and directory if they exist."
-    # Close any open file descriptors first
-    for fd in {200..210}; do
-      eval "exec $fd>&-" 2>/dev/null
-    done
-    log_debug "Closed potential file descriptors"
-    
-    # Remove both lock file and lock directory
+    log_warn "Force-break enabled. Removing lock file if it exists."
     rm -f "$lock_path" 2>/dev/null
-    rm -rf "$lock_path.dir" 2>/dev/null
     sleep 1
   fi
-  
-  # Try to acquire lock using mkdir (more atomic than file creation)
+
+  # Create lock file if it doesn't exist
+  touch "$lock_path" 2>/dev/null || {
+    log_error "Failed to create lock file: $lock_path"
+    return 1
+  }
+
+  # Set restrictive permissions on lock file
+  chmod 600 "$lock_path" 2>/dev/null
+
+  # Try to acquire lock using flock (atomic, no TOCTOU)
   while true; do
     current_time=$(date +%s)
-    
+
     # Check for timeout
     if [ $current_time -ge $end_time ]; then
       log_error "Failed to acquire lock after ${lock_timeout} seconds: $lock_path"
       return 1
     fi
-    
-    # Use mkdir for atomic lock acquisition - safer than file creation
-    if mkdir "$lock_path.dir" 2>/dev/null; then
-      # We got the lock, create a PID file for debugging
-      echo "$(date +'%Y-%m-%d %H:%M:%S') $$" > "$lock_path"
-      log_debug "Lock acquired using directory method: $lock_path"
-      return 0
-    else
-      # Check if the lock is stale
-      if [ -d "$lock_path.dir" ] && [ -f "$lock_path" ]; then
-        # Read the PID from the lock file
-        local lock_data=$(cat "$lock_path" 2>/dev/null)
-        if [ -n "$lock_data" ]; then
-          local lock_timestamp=$(echo "$lock_data" | awk '{print $1" "$2}')
-          local lock_pid=$(echo "$lock_data" | awk '{print $3}')
-          
-          # Convert timestamp to seconds since epoch
-          local lock_time=$(date -j -f "%Y-%m-%d %H:%M:%S" "$lock_timestamp" "+%s" 2>/dev/null)
-          
-          # If the PID doesn't exist, or the lock is older than 10 minutes, break it
-          if ! kill -0 "$lock_pid" 2>/dev/null || [ $((current_time - lock_time)) -gt 600 ]; then
-            log_warn "Found stale lock (PID: $lock_pid not running or lock too old). Breaking."
-            rm -f "$lock_path" 2>/dev/null
-            rm -rf "$lock_path.dir" 2>/dev/null
-          fi
-        else
-          # Lock file exists but is empty or unreadable - consider it stale
-          log_warn "Found potentially corrupt lock file. Breaking."
-          rm -f "$lock_path" 2>/dev/null
-          rm -rf "$lock_path.dir" 2>/dev/null
-        fi
+
+    # Use flock for atomic lock acquisition
+    # -n = non-blocking, -x = exclusive lock
+    # Redirect FD 200 to lock file
+    if eval "exec ${lock_fd}<>\"$lock_path\"" 2>/dev/null; then
+      if eval "flock -n ${lock_fd}" 2>/dev/null; then
+        # We got the lock! Write our PID for debugging
+        echo "$(date +'%Y-%m-%d %H:%M:%S') $$" >&${lock_fd}
+        log_debug "Lock acquired using flock on FD ${lock_fd}: $lock_path"
+
+        # Store the lock FD in a global variable so we can release it later
+        LOCK_FD=${lock_fd}
+        export LOCK_FD
+
+        return 0
+      else
+        # Lock is held by another process
+        # Close our file descriptor and try again
+        eval "exec ${lock_fd}>&-" 2>/dev/null
+
+        log_debug "Lock held by another process, retrying..."
+        sleep 1
+        continue
       fi
+    else
+      log_error "Failed to open lock file descriptor for: $lock_path"
+      return 1
     fi
-    
-    # Sleep briefly before trying again
-    sleep 1
   done
 }
 
 # Function to release a lock
+# SECURITY FIX: Issue #28 - Uses flock file descriptor release
 release_lock() {
   local lock_path="${LOCK_FILE}"
-  
+
   log_debug "Releasing lock: $lock_path"
-  
-  # Clean up both lock file and directory
-  rm -f "$lock_path" 2>/dev/null
-  rm -rf "$lock_path.dir" 2>/dev/null
-  
-  # Close any open file descriptors for good measure
-  for fd in {200..210}; do
-    eval "exec $fd>&-" 2>/dev/null
-  done
-  
+
+  # Release flock by closing the file descriptor
+  if [ -n "${LOCK_FD:-}" ]; then
+    eval "exec ${LOCK_FD}>&-" 2>/dev/null
+    log_debug "Closed lock file descriptor: ${LOCK_FD}"
+    unset LOCK_FD
+  fi
+
+  # Note: We don't remove the lock file itself as flock manages the lock state
+  # The file can remain for debugging purposes
+
   return 0
 }
 
 # Function to clean up any locks at startup
+# SECURITY FIX: Issue #28 - Updated for flock-based locking
 clean_all_locks() {
   log_info "Cleaning up all potential lock files"
-  
-  # Clean up lock files
-  rm -f "/tmp/erase-install-wrapper-main.lock" 2>/dev/null
-  rm -rf "/tmp/erase-install-wrapper-main.lock.dir" 2>/dev/null
-  rm -f "/var/run/erase-install-wrapper.lock" 2>/dev/null
-  rm -rf "/var/run/erase-install-wrapper.lock.dir" 2>/dev/null
-  
-  # Close any potentially open file descriptors
+
+  # Close any potentially open file descriptors first
   for fd in {200..210}; do
     eval "exec $fd>&-" 2>/dev/null
   done
+
+  # Clean up lock files (flock releases automatically on process exit,
+  # but we remove the files for cleanliness)
+  rm -f "/tmp/erase-install-wrapper-main.lock" 2>/dev/null
+  rm -f "/var/run/erase-install-wrapper.lock" 2>/dev/null
+
+  # Clean up legacy .dir files from previous locking implementation
+  rm -rf "/tmp/erase-install-wrapper-main.lock.dir" 2>/dev/null
+  rm -rf "/var/run/erase-install-wrapper.lock.dir" 2>/dev/null
   
   log_debug "Lock cleanup completed"
 }
