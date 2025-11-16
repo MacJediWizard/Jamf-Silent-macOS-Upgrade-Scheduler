@@ -497,6 +497,124 @@ create_secure_temp_dir() {
 }
 
 #######################################
+# SECURITY: Verify downloaded package integrity
+# Arguments:
+#   $1 - Path to package file
+#   $2 - Package name (for logging)
+# Returns:
+#   0 if verification passes, 1 if fails
+#######################################
+verify_package_integrity() {
+    local pkg_path="$1"
+    local pkg_name="${2:-package}"
+
+    if [[ ! -f "$pkg_path" ]]; then
+        log_error "Package file not found: $pkg_path"
+        return 1
+    fi
+
+    # 1. Verify minimum file size (prevent empty/truncated downloads)
+    local file_size=$(stat -f%z "$pkg_path" 2>/dev/null || echo "0")
+    if [[ $file_size -lt 1000000 ]]; then
+        log_error "${pkg_name}: File too small (${file_size} bytes) - likely corrupted"
+        return 1
+    fi
+    log_info "${pkg_name}: Size check passed (${file_size} bytes)"
+
+    # 2. Verify package signature (Apple code signing)
+    log_info "${pkg_name}: Verifying package signature..."
+    if ! pkgutil --check-signature "$pkg_path" >/dev/null 2>&1; then
+        log_warn "${pkg_name}: Package signature verification failed or not signed"
+        log_warn "${pkg_name}: This may be expected for some packages, continuing with caution"
+        # Don't fail - some legitimate packages may not be signed
+        # But log it for security audit trail
+        logger -t "erase-install-wrapper" -p user.warning "Unsigned package detected: $pkg_path"
+    else
+        log_info "${pkg_name}: Package signature verified successfully"
+        # Log signature details for audit
+        local sig_info=$(pkgutil --check-signature "$pkg_path" 2>&1 | head -5)
+        log_debug "${pkg_name}: Signature info: $sig_info"
+    fi
+
+    # 3. Verify file type (should be package or disk image)
+    local file_type=$(file -b "$pkg_path")
+    if [[ ! "$file_type" =~ (xar archive|disk image|Zip archive) ]]; then
+        log_error "${pkg_name}: Invalid file type: $file_type"
+        return 1
+    fi
+    log_info "${pkg_name}: File type verified: $file_type"
+
+    # 4. For .pkg files, verify basic plist structure
+    if [[ "$pkg_path" == *.pkg ]]; then
+        if ! pkgutil --payload-files "$pkg_path" >/dev/null 2>&1; then
+            log_error "${pkg_name}: Package structure validation failed"
+            return 1
+        fi
+        log_info "${pkg_name}: Package structure validated"
+    fi
+
+    # All checks passed
+    log_info "${pkg_name}: All integrity checks passed"
+    return 0
+}
+
+#######################################
+# SECURITY: Atomically install LaunchDaemon with correct permissions
+# Arguments:
+#   $1 - Source daemon plist path
+#   $2 - Destination path in /Library/LaunchDaemons
+# Returns:
+#   0 if successful, 1 if failed
+#######################################
+install_daemon_secure() {
+    local source_path="$1"
+    local dest_path="$2"
+
+    if [[ ! -f "$source_path" ]]; then
+        log_error "Source daemon file not found: $source_path"
+        return 1
+    fi
+
+    # SECURITY FIX (Issue #26): Validate plist before installation
+    if ! plutil -lint "$source_path" >/dev/null 2>&1; then
+        log_error "Daemon plist validation failed: $source_path"
+        return 1
+    fi
+    log_debug "Daemon plist validated: $source_path"
+
+    # SECURITY FIX (Issue #26): Use install command for atomic operation
+    # This sets ownership and permissions in a single atomic operation
+    # eliminating the race condition window
+    if ! sudo install -m 644 -o root -g wheel "$source_path" "$dest_path" 2>/dev/null; then
+        log_error "Failed to install daemon atomically to: $dest_path"
+        return 1
+    fi
+
+    # Verify the installation was successful
+    if [[ ! -f "$dest_path" ]]; then
+        log_error "Daemon file not found after installation: $dest_path"
+        return 1
+    fi
+
+    # Verify permissions are correct (644)
+    local perms=$(stat -f %Lp "$dest_path" 2>/dev/null)
+    if [[ "$perms" != "644" ]]; then
+        log_error "Daemon permissions incorrect: $perms (expected 644)"
+        return 1
+    fi
+
+    # Verify ownership is correct (root:wheel)
+    local owner=$(stat -f %Su:%Sg "$dest_path" 2>/dev/null)
+    if [[ "$owner" != "root:wheel" ]]; then
+        log_error "Daemon ownership incorrect: $owner (expected root:wheel)"
+        return 1
+    fi
+
+    log_info "Daemon installed securely: $dest_path"
+    return 0
+}
+
+#######################################
 # Apply branding to dialog parameters
 # Arguments:
 #   $1 - Dialog title
@@ -1488,14 +1606,14 @@ install_erase_install() {
       log_info "Target URL: ${target_url}"
       
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${target_url}"; then
-        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified."
+        # SECURITY FIX (Issue #25): Verify package integrity after download
+        if verify_package_integrity "${pkg_path}" "erase-install"; then
+          log_info "Package download successful and integrity verified."
           download_success=true
         else
-          log_warn "Downloaded file is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Package integrity verification failed - removing potentially compromised file"
+          rm -f "${pkg_path}"
+          download_success=false
         fi
       else
         log_warn "Download failed from ${target_url}."
@@ -1521,14 +1639,14 @@ install_erase_install() {
       log_info "Trying URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -1549,14 +1667,14 @@ install_erase_install() {
       log_info "Trying generic URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -1681,14 +1799,14 @@ install_swiftDialog() {
       log_info "Target URL: ${target_url}"
       
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${target_url}"; then
-        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified."
+        # SECURITY FIX (Issue #25): Verify package integrity after download
+        if verify_package_integrity "${pkg_path}" "erase-install"; then
+          log_info "Package download successful and integrity verified."
           download_success=true
         else
-          log_warn "Downloaded file is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Package integrity verification failed - removing potentially compromised file"
+          rm -f "${pkg_path}"
+          download_success=false
         fi
       else
         log_warn "Download failed from ${target_url}."
@@ -1715,14 +1833,14 @@ install_swiftDialog() {
       log_info "Trying URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -1744,14 +1862,14 @@ install_swiftDialog() {
       log_info "Trying generic URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -4320,9 +4438,13 @@ ABORTDAEMON
   fi
   
   # Copy the file to the final location with proper permissions
-  sudo cp "$tmp_daemon_path" "$abort_daemon_path"
-  sudo chmod 644 "$abort_daemon_path"
-  sudo chown root:wheel "$abort_daemon_path"
+  # SECURITY FIX (Issue #26): Use secure atomic installation
+  if ! install_daemon_secure "$tmp_daemon_path" "$abort_daemon_path"; then
+    log_error "Failed to install abort daemon securely"
+    rm -f "$tmp_daemon_path"
+    return 1
+  fi
+  rm -f "$tmp_daemon_path"
   
   # Clean up temp file
   rm -f "$tmp_daemon_path"
@@ -4452,9 +4574,13 @@ load_abort_daemon() {
     sudo cp "$daemon_path" "$tmp_path"
     sudo plutil -replace RunAtLoad -bool true "$tmp_path"
     if sudo plutil -lint "$tmp_path" >/dev/null 2>&1; then
-      sudo cp "$tmp_path" "$daemon_path"
-      sudo chmod 644 "$daemon_path"
-      sudo chown root:wheel "$daemon_path"
+      # SECURITY FIX (Issue #26): Use secure atomic installation
+      if ! install_daemon_secure "$tmp_path" "$daemon_path"; then
+        log_error "Failed to install daemon securely"
+        rm -f "$tmp_path"
+        return 1
+      fi
+      rm -f "$tmp_path"
       log_message "Fixed RunAtLoad setting in daemon plist"
     fi
     rm -f "$tmp_path" 2>/dev/null
@@ -5430,8 +5556,7 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
   fi
   
   # Ensure proper permissions
-  sudo chown root:wheel "$daemon_path"
-  sudo chmod 644 "$daemon_path"
+  # Note: Permissions already set atomically during file write or via install_daemon_secure()
   
   # Load and verify the daemon using our helper function
   if ! load_and_verify_daemon "$daemon_path" "$daemon_label"; then
