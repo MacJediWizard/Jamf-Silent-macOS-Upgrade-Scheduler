@@ -5288,16 +5288,25 @@ EOT
     sed -i '' "s|__SHOW_AUTH_NOTICE__|false|g" "$watchdog_script"
   fi
   
-  # Use @ as delimiter for messages that might contain special characters
-  sed -i '' "s@__AUTH_NOTICE_TITLE__@${AUTH_NOTICE_TITLE}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_TITLE_TEST_MODE__@${AUTH_NOTICE_TITLE_TEST_MODE}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_MESSAGE__@${AUTH_NOTICE_MESSAGE}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_BUTTON__@${AUTH_NOTICE_BUTTON}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_ICON__@${AUTH_NOTICE_ICON}@g" "$watchdog_script"
+  # SECURITY FIX (Issue #22): Escape ALL sed substitutions to prevent command injection
+  # Use escape_sed() for all user-controlled values that could contain special characters
+  local escaped_auth_title=$(escape_sed "$AUTH_NOTICE_TITLE")
+  local escaped_auth_title_test=$(escape_sed "$AUTH_NOTICE_TITLE_TEST_MODE")
+  local escaped_auth_message=$(escape_sed "$AUTH_NOTICE_MESSAGE")
+  local escaped_auth_button=$(escape_sed "$AUTH_NOTICE_BUTTON")
+  local escaped_auth_icon=$(escape_sed "$AUTH_NOTICE_ICON")
+  local escaped_dialog_bin=$(escape_sed "$DIALOG_BIN")
+  local escaped_dialog_position=$(escape_sed "$DIALOG_POSITION")
+
+  sed -i '' "s@__AUTH_NOTICE_TITLE__@${escaped_auth_title}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_TITLE_TEST_MODE__@${escaped_auth_title_test}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_MESSAGE__@${escaped_auth_message}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_BUTTON__@${escaped_auth_button}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_ICON__@${escaped_auth_icon}@g" "$watchdog_script"
   sed -i '' "s|__AUTH_NOTICE_HEIGHT__|${AUTH_NOTICE_HEIGHT}|g" "$watchdog_script"
   sed -i '' "s|__AUTH_NOTICE_WIDTH__|${AUTH_NOTICE_WIDTH}|g" "$watchdog_script"
-  sed -i '' "s@__DIALOG_PATH__@${DIALOG_BIN}@g" "$watchdog_script"
-  sed -i '' "s@__DIALOG_POSITION__@${DIALOG_POSITION}@g" "$watchdog_script"
+  sed -i '' "s@__DIALOG_PATH__@${escaped_dialog_bin}@g" "$watchdog_script"
+  sed -i '' "s@__DIALOG_POSITION__@${escaped_dialog_position}@g" "$watchdog_script"
   
   # Verify script substitutions in debug mode
   if [[ "${DEBUG_MODE}" == "true" ]]; then
