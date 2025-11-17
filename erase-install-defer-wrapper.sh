@@ -214,6 +214,14 @@ INSTALLER_OS="15"                   # Target macOS version number to install in 
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
 #
+# ---- Time Constants (Issue #19) ----
+readonly SECONDS_PER_MINUTE=60       # Number of seconds in one minute
+readonly SECONDS_PER_HOUR=3600       # Number of seconds in one hour (60 * 60)
+readonly SECONDS_PER_DAY=86400       # Number of seconds in one day (60 * 60 * 24)
+readonly MIN_DOWNLOAD_SIZE_BYTES=1000000  # Minimum acceptable download size (1 MB)
+readonly MAX_WATCHDOG_WAIT=180       # Maximum time to wait for watchdog (3 minutes)
+readonly LOCK_STALE_THRESHOLD=600    # Time before lock is considered stale (10 minutes)
+#
 # ---- File Paths ----
 PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"  # Preferences file location
 SCRIPT_PATH="/Library/Management/erase-install/erase-install.sh"    # Grham Pugh Erase-Install Script Path
