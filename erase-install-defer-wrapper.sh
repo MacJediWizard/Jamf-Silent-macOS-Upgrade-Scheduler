@@ -1,5 +1,32 @@
 #!/bin/bash
 
+# Strict error handling for production reliability
+# Exit on errors, undefined variables, and pipeline failures
+set -euo pipefail
+
+# Error trap for debugging
+error_handler() {
+    local line_number=$1
+    local bash_lineno=$2
+    local command="$3"
+    local error_code=$4
+
+    echo "[CRITICAL ERROR] Script failed at line ${line_number} (in function called from line ${bash_lineno})" >&2
+    echo "[CRITICAL ERROR] Command: ${command}" >&2
+    echo "[CRITICAL ERROR] Exit code: ${error_code}" >&2
+    echo "[CRITICAL ERROR] Please check logs at: ${WRAPPER_LOG:-/var/log/erase-install-wrapper.log}" >&2
+
+    # Cleanup on error if possible
+    if declare -f cleanup_on_error >/dev/null 2>&1; then
+        cleanup_on_error || true
+    fi
+
+    exit "${error_code}"
+}
+
+# Set error trap
+trap 'error_handler ${LINENO} ${BASH_LINENO} "$BASH_COMMAND" $?' ERR
+
 #######################################################################################################################################################################
 #
 # MacJediWizard Consulting, Inc.
@@ -186,6 +213,14 @@ SCRIPT_VERSION="2.0.0"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
+#
+# ---- Time Constants (Issue #19) ----
+readonly SECONDS_PER_MINUTE=60       # Number of seconds in one minute
+readonly SECONDS_PER_HOUR=3600       # Number of seconds in one hour (60 * 60)
+readonly SECONDS_PER_DAY=86400       # Number of seconds in one day (60 * 60 * 24)
+readonly MIN_DOWNLOAD_SIZE_BYTES=1000000  # Minimum acceptable download size (1 MB)
+readonly MAX_WATCHDOG_WAIT=180       # Maximum time to wait for watchdog (3 minutes)
+readonly LOCK_STALE_THRESHOLD=600    # Time before lock is considered stale (10 minutes)
 #
 # ---- File Paths ----
 PLIST="/Library/Preferences/com.macjediwizard.eraseinstall.plist"  # Preferences file location
@@ -386,29 +421,60 @@ validate_path() {
     local path="$1"
     local expected_prefix="${2:-}"
 
-    # Check for path traversal sequences
-    if [[ "$path" == *".."* ]]; then
+    # SECURITY FIX (Issue #27): Check for symbolic links
+    if [[ -L "$path" ]]; then
+        echo "[ERROR] Symbolic links not allowed: $path" >&2
+        return 1
+    fi
+
+    # SECURITY FIX (Issue #27): Check for path traversal (including URL-encoded)
+    if [[ "$path" == *".."* ]] || [[ "$path" == *"%2e"* ]] || [[ "$path" == *"%2E"* ]]; then
         echo "[ERROR] Path traversal detected in: $path" >&2
         return 1
     fi
 
-    # If expected prefix provided, validate
-    if [[ -n "$expected_prefix" ]]; then
-        # Get absolute path if it exists
-        if [[ -e "$path" ]]; then
-            local resolved_path
-            resolved_path=$(cd "$(dirname "$path")" && pwd)/$(basename "$path") 2>/dev/null || echo "$path"
-            if [[ ! "$resolved_path" == "$expected_prefix"* ]]; then
-                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
-                return 1
-            fi
-        else
-            # For non-existent paths, just check the string
-            if [[ ! "$path" == "$expected_prefix"* ]]; then
-                echo "[ERROR] Path outside allowed directory: $path (expected: $expected_prefix*)" >&2
-                return 1
-            fi
+    # SECURITY FIX (Issue #27): Use realpath for canonical resolution
+    local canonical_path=""
+    if [[ -e "$path" ]]; then
+        # Use perl for canonical path (realpath not always available)
+        canonical_path=$(perl -MCwd -e 'print Cwd::abs_path shift' "$path" 2>/dev/null)
+        if [[ -z "$canonical_path" ]]; then
+            echo "[ERROR] Cannot resolve canonical path: $path" >&2
+            return 1
         fi
+
+        # Verify no symlinks in path hierarchy
+        local check_path="$canonical_path"
+        while [[ "$check_path" != "/" ]]; do
+            if [[ -L "$check_path" ]]; then
+                echo "[ERROR] Symlink in path hierarchy: $check_path" >&2
+                return 1
+            fi
+            check_path=$(dirname "$check_path")
+        done
+    else
+        canonical_path="$path"
+    fi
+
+    # Validate against expected prefix
+    if [[ -n "$expected_prefix" ]]; then
+        local canonical_prefix
+        if [[ -e "$expected_prefix" ]]; then
+            canonical_prefix=$(perl -MCwd -e 'print Cwd::abs_path shift' "$expected_prefix" 2>/dev/null)
+        else
+            canonical_prefix="$expected_prefix"
+        fi
+
+        if [[ ! "$canonical_path" == "$canonical_prefix"* ]]; then
+            echo "[ERROR] Path outside allowed directory: $canonical_path" >&2
+            return 1
+        fi
+    fi
+
+    # Check for null bytes
+    if [[ "$path" == *$'\0'* ]]; then
+        echo "[ERROR] Null byte detected in path" >&2
+        return 1
     fi
 
     return 0
@@ -440,6 +506,257 @@ create_secure_temp() {
     }
 
     echo "$temp_file"
+}
+
+#######################################
+# SECURITY: Create secure temporary directory with mktemp
+# Arguments:
+#   $1 - Template name (e.g., "download-pkg")
+# Returns:
+#   Path to created temp directory
+#######################################
+create_secure_temp_dir() {
+    local template="$1"
+    local temp_dir
+
+    # Create temp directory with secure template
+    temp_dir=$(mktemp -d "/tmp/${template}.XXXXXXXXXX") || {
+        echo "[ERROR] Failed to create secure temporary directory" >&2
+        return 1
+    }
+
+    # Set restrictive permissions immediately (700 - owner only)
+    chmod 700 "$temp_dir" || {
+        rm -rf "$temp_dir"
+        echo "[ERROR] Failed to set permissions on temporary directory" >&2
+        return 1
+    }
+
+    echo "$temp_dir"
+}
+
+#######################################
+# SECURITY: Verify downloaded package integrity
+# Arguments:
+#   $1 - Path to package file
+#   $2 - Package name (for logging)
+# Returns:
+#   0 if verification passes, 1 if fails
+#######################################
+verify_package_integrity() {
+    local pkg_path="$1"
+    local pkg_name="${2:-package}"
+
+    if [[ ! -f "$pkg_path" ]]; then
+        log_error "Package file not found: $pkg_path"
+        return 1
+    fi
+
+    # 1. Verify minimum file size (prevent empty/truncated downloads)
+    local file_size=$(stat -f%z "$pkg_path" 2>/dev/null || echo "0")
+    if [[ $file_size -lt 1000000 ]]; then
+        log_error "${pkg_name}: File too small (${file_size} bytes) - likely corrupted"
+        return 1
+    fi
+    log_info "${pkg_name}: Size check passed (${file_size} bytes)"
+
+    # 2. Verify package signature (Apple code signing)
+    log_info "${pkg_name}: Verifying package signature..."
+    if ! pkgutil --check-signature "$pkg_path" >/dev/null 2>&1; then
+        log_warn "${pkg_name}: Package signature verification failed or not signed"
+        log_warn "${pkg_name}: This may be expected for some packages, continuing with caution"
+        # Don't fail - some legitimate packages may not be signed
+        # But log it for security audit trail
+        logger -t "erase-install-wrapper" -p user.warning "Unsigned package detected: $pkg_path"
+    else
+        log_info "${pkg_name}: Package signature verified successfully"
+        # Log signature details for audit
+        local sig_info=$(pkgutil --check-signature "$pkg_path" 2>&1 | head -5)
+        log_debug "${pkg_name}: Signature info: $sig_info"
+    fi
+
+    # 3. Verify file type (should be package or disk image)
+    local file_type=$(file -b "$pkg_path")
+    if [[ ! "$file_type" =~ (xar archive|disk image|Zip archive) ]]; then
+        log_error "${pkg_name}: Invalid file type: $file_type"
+        return 1
+    fi
+    log_info "${pkg_name}: File type verified: $file_type"
+
+    # 4. For .pkg files, verify basic plist structure
+    if [[ "$pkg_path" == *.pkg ]]; then
+        if ! pkgutil --payload-files "$pkg_path" >/dev/null 2>&1; then
+            log_error "${pkg_name}: Package structure validation failed"
+            return 1
+        fi
+        log_info "${pkg_name}: Package structure validated"
+    fi
+
+    # All checks passed
+    log_info "${pkg_name}: All integrity checks passed"
+    return 0
+}
+
+#######################################
+# SECURITY: Atomically install LaunchDaemon with correct permissions
+# Arguments:
+#   $1 - Source daemon plist path
+#   $2 - Destination path in /Library/LaunchDaemons
+# Returns:
+#   0 if successful, 1 if failed
+#######################################
+install_daemon_secure() {
+    local source_path="$1"
+    local dest_path="$2"
+
+    if [[ ! -f "$source_path" ]]; then
+        log_error "Source daemon file not found: $source_path"
+        return 1
+    fi
+
+    # SECURITY FIX (Issue #26): Validate plist before installation
+    if ! plutil -lint "$source_path" >/dev/null 2>&1; then
+        log_error "Daemon plist validation failed: $source_path"
+        return 1
+    fi
+    log_debug "Daemon plist validated: $source_path"
+
+    # SECURITY FIX (Issue #26): Use install command for atomic operation
+    # This sets ownership and permissions in a single atomic operation
+    # eliminating the race condition window
+    if ! sudo install -m 644 -o root -g wheel "$source_path" "$dest_path" 2>/dev/null; then
+        log_error "Failed to install daemon atomically to: $dest_path"
+        return 1
+    fi
+
+    # Verify the installation was successful
+    if [[ ! -f "$dest_path" ]]; then
+        log_error "Daemon file not found after installation: $dest_path"
+        return 1
+    fi
+
+    # Verify permissions are correct (644)
+    local perms=$(stat -f %Lp "$dest_path" 2>/dev/null)
+    if [[ "$perms" != "644" ]]; then
+        log_error "Daemon permissions incorrect: $perms (expected 644)"
+        return 1
+    fi
+
+    # Verify ownership is correct (root:wheel)
+    local owner=$(stat -f %Su:%Sg "$dest_path" 2>/dev/null)
+    if [[ "$owner" != "root:wheel" ]]; then
+        log_error "Daemon ownership incorrect: $owner (expected root:wheel)"
+        return 1
+    fi
+
+    log_info "Daemon installed securely: $dest_path"
+    return 0
+}
+
+#######################################
+# SECURITY: Safely terminate processes with graceful shutdown
+# Arguments:
+#   $1 - Process pattern to match (for pgrep)
+#   $2 - Timeout in seconds (optional, default 5)
+# Returns:
+#   0 if processes terminated, 1 if error
+#######################################
+kill_process_safely() {
+    local process_pattern="$1"
+    local timeout="${2:-5}"
+
+    # SECURITY FIX (Issue #29): Use pgrep instead of ps|grep|awk
+    local pids
+    pids=$(pgrep -f "$process_pattern" 2>/dev/null) || return 0
+
+    if [[ -z "$pids" ]]; then
+        return 0
+    fi
+
+    log_info "Found processes matching '$process_pattern': $pids"
+
+    # Send SIGTERM for graceful shutdown
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            log_info "Sending SIGTERM to PID $pid for graceful shutdown"
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for graceful termination
+    local waited=0
+    while [[ $waited -lt $timeout ]]; do
+        pids=$(pgrep -f "$process_pattern" 2>/dev/null)
+        if [[ -z "$pids" ]]; then
+            log_info "Processes terminated gracefully"
+            return 0
+        fi
+        sleep 1
+        ((waited++))
+    done
+
+    # Force kill if still running after timeout
+    pids=$(pgrep -f "$process_pattern" 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+        log_warn "Processes did not terminate gracefully, sending SIGKILL to: $pids"
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+
+        # Final verification
+        sleep 1
+        pids=$(pgrep -f "$process_pattern" 2>/dev/null)
+        if [[ -n "$pids" ]]; then
+            log_error "Failed to terminate processes: $pids"
+            return 1
+        fi
+    fi
+
+    log_info "All matching processes terminated"
+    return 0
+}
+
+#######################################
+# Apply branding to dialog parameters
+# Arguments:
+#   $1 - Dialog title
+#   $2 - Dialog message
+#   $3 - Dialog icon
+# Returns:
+#   Prints three lines: branded_title, branded_message, branded_icon
+#######################################
+apply_branding() {
+    local title="$1"
+    local message="$2"
+    local icon="$3"
+    local branded_title="$title"
+    local branded_message="$message"
+    local branded_icon="$icon"
+
+    # Only apply branding if enabled
+    if [[ "$ENABLE_BRANDING" == "true" ]]; then
+        # Add company name to title if enabled
+        if [[ "$SHOW_COMPANY_NAME_IN_TITLE" == "true" ]] && [[ -n "$COMPANY_NAME" ]]; then
+            branded_title="${COMPANY_NAME} - ${title}"
+        fi
+
+        # Add support contact to message if enabled
+        if [[ "$SHOW_SUPPORT_IN_MESSAGE" == "true" ]] && [[ -n "$SUPPORT_CONTACT" ]]; then
+            branded_message="${message}\n\n---\n${SUPPORT_CONTACT}"
+        fi
+
+        # Use company logo if enabled and file exists
+        if [[ "$USE_COMPANY_LOGO" == "true" ]] && [[ -f "$COMPANY_LOGO" ]]; then
+            branded_icon="$COMPANY_LOGO"
+        fi
+    fi
+
+    # Output results (one per line for easy parsing)
+    echo "$branded_title"
+    echo "$branded_message"
+    echo "$branded_icon"
 }
 
 # This function loads configuration from JSON files with fallback to script defaults
@@ -574,6 +891,17 @@ load_json_config() {
     # Load Logging Configuration
     MAX_LOG_SIZE_MB=$(read_json "logging.MAX_LOG_SIZE_MB" "10")
     MAX_LOG_FILES=$(read_json "logging.MAX_LOG_FILES" "5")
+
+    # Load Branding Configuration
+    ENABLE_BRANDING=$(read_json "branding.ENABLE_BRANDING" "false")
+    COMPANY_NAME=$(read_json "branding.COMPANY_NAME" "Your Company Name")
+    COMPANY_LOGO=$(read_json "branding.COMPANY_LOGO" "/Library/Management/branding/logo.png")
+    SUPPORT_CONTACT=$(read_json "branding.SUPPORT_CONTACT" "IT Support: support@company.com or ext. 1234")
+    SHOW_COMPANY_NAME_IN_TITLE=$(read_json "branding.SHOW_COMPANY_NAME_IN_TITLE" "true")
+    SHOW_SUPPORT_IN_MESSAGE=$(read_json "branding.SHOW_SUPPORT_IN_MESSAGE" "true")
+    USE_COMPANY_LOGO=$(read_json "branding.USE_COMPANY_LOGO" "true")
+    LOGO_WIDTH=$(read_json "branding.LOGO_WIDTH" "128")
+    LOGO_HEIGHT=$(read_json "branding.LOGO_HEIGHT" "128")
 
     # Load Main Dialog Settings
     DIALOG_TITLE=$(read_json "main_dialog.DIALOG_TITLE" "macOS Upgrade Required")
@@ -728,6 +1056,21 @@ load_json_config() {
     validated_value=$(validate_positive_integer "$MAX_LOG_FILES" "5" "50" "false")
     [[ "$validated_value" != "$MAX_LOG_FILES" ]] && MAX_LOG_FILES="5"
 
+    # Branding settings validation
+    validated_value=$(validate_positive_integer "$LOGO_WIDTH" "128" "512" "false")
+    [[ "$validated_value" != "$LOGO_WIDTH" ]] && LOGO_WIDTH="128"
+
+    validated_value=$(validate_positive_integer "$LOGO_HEIGHT" "128" "512" "false")
+    [[ "$validated_value" != "$LOGO_HEIGHT" ]] && LOGO_HEIGHT="128"
+
+    # Validate company logo path if branding is enabled
+    if [[ "$ENABLE_BRANDING" == "true" ]] && [[ "$USE_COMPANY_LOGO" == "true" ]]; then
+        if [[ ! -f "$COMPANY_LOGO" ]]; then
+            echo "[CONFIG] WARNING: Company logo not found at $COMPANY_LOGO - will use default icon" >&2
+            USE_COMPANY_LOGO="false"
+        fi
+    fi
+
     # Log configuration summary
     echo "[CONFIG] ========================================" >&2
     echo "[CONFIG] Configuration loaded from: $config_source" >&2
@@ -742,6 +1085,14 @@ load_json_config() {
     echo "[CONFIG]   Debug Mode: ${DEBUG_MODE}" >&2
     echo "[CONFIG]   Skip OS Check: ${SKIP_OS_VERSION_CHECK}" >&2
     echo "[CONFIG]   Prevent Reboots: ${PREVENT_ALL_REBOOTS}" >&2
+    echo "[CONFIG] Branding:" >&2
+    echo "[CONFIG]   Enabled: ${ENABLE_BRANDING}" >&2
+    if [[ "$ENABLE_BRANDING" == "true" ]]; then
+        echo "[CONFIG]   Company Name: ${COMPANY_NAME}" >&2
+        echo "[CONFIG]   Use Logo: ${USE_COMPANY_LOGO}" >&2
+        [[ "$USE_COMPANY_LOGO" == "true" ]] && echo "[CONFIG]   Logo Path: ${COMPANY_LOGO}" >&2
+        echo "[CONFIG]   Show Support Info: ${SHOW_SUPPORT_IN_MESSAGE}" >&2
+    fi
     echo "[CONFIG] ========================================" >&2
 
     return 0
@@ -879,9 +1230,11 @@ init_logging() {
     fi
   }
   
-  # Set appropriate permissions
+  # SECURITY FIX (Issue #30): Set restrictive permissions to prevent information disclosure
+  # Log files contain sensitive configuration and timing information
   if [[ -f "${WRAPPER_LOG}" ]]; then
-    chmod 644 "${WRAPPER_LOG}" 2>/dev/null
+    chmod 600 "${WRAPPER_LOG}" 2>/dev/null
+    chown root:wheel "${WRAPPER_LOG}" 2>/dev/null
     # Make parent directory writable by all users if needed
     if [[ "${LOG_DIR}" == "/Users/Shared" ]]; then
       chmod 777 "${LOG_DIR}" 2>/dev/null
@@ -970,12 +1323,9 @@ show_auth_notice() {
   # Enhanced console user detection for LaunchDaemon context
   local console_user=""
   local console_uid=""
-  
-  # Multiple detection methods for reliability
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
-  [ -z "$console_user" ] && console_user=$(ls -l /dev/console | awk '{print $3}')
+
+  # Use centralized console user detection function
+  console_user=$(get_console_user)
   
   # Get UID with validation
   if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
@@ -1186,116 +1536,117 @@ EOFSCRIPT
 
 # ---------------- Locking Functions ----------------
 
-# Function to acquire a lock with improved atomicity
+# Function to acquire a lock using flock for atomic operations
+# SECURITY FIX: Issue #28 - Eliminates TOCTOU race conditions
 acquire_lock() {
   local lock_path="$1"
   local lock_timeout="${2:-60}"  # Default timeout of 60 seconds
   local force_break="${3:-false}" # Parameter to force break locks
-  
+
   local start_time=$(date +%s)
   local end_time=$((start_time + lock_timeout))
   local current_time
-  
+  local lock_fd=200  # Use file descriptor 200 for locking
+
   # Create lock directory if it doesn't exist
   mkdir -p "$(dirname "$lock_path")" 2>/dev/null
-  
+
   log_debug "Attempting to acquire lock: $lock_path (timeout: ${lock_timeout}s, force_break: ${force_break})"
-  
-  # If force break is enabled, just remove any existing locks
+
+  # If force break is enabled, remove any existing locks
   if [ "$force_break" = "true" ]; then
-    log_warn "Force-break enabled. Removing lock file and directory if they exist."
-    # Close any open file descriptors first
-    for fd in {200..210}; do
-      eval "exec $fd>&-" 2>/dev/null
-    done
-    log_debug "Closed potential file descriptors"
-    
-    # Remove both lock file and lock directory
+    log_warn "Force-break enabled. Removing lock file if it exists."
     rm -f "$lock_path" 2>/dev/null
-    rm -rf "$lock_path.dir" 2>/dev/null
     sleep 1
   fi
-  
-  # Try to acquire lock using mkdir (more atomic than file creation)
+
+  # Create lock file if it doesn't exist
+  touch "$lock_path" 2>/dev/null || {
+    log_error "Failed to create lock file: $lock_path"
+    return 1
+  }
+
+  # Set restrictive permissions on lock file
+  chmod 600 "$lock_path" 2>/dev/null
+
+  # Try to acquire lock using flock (atomic, no TOCTOU)
   while true; do
     current_time=$(date +%s)
-    
+
     # Check for timeout
     if [ $current_time -ge $end_time ]; then
       log_error "Failed to acquire lock after ${lock_timeout} seconds: $lock_path"
       return 1
     fi
-    
-    # Use mkdir for atomic lock acquisition - safer than file creation
-    if mkdir "$lock_path.dir" 2>/dev/null; then
-      # We got the lock, create a PID file for debugging
-      echo "$(date +'%Y-%m-%d %H:%M:%S') $$" > "$lock_path"
-      log_debug "Lock acquired using directory method: $lock_path"
-      return 0
-    else
-      # Check if the lock is stale
-      if [ -d "$lock_path.dir" ] && [ -f "$lock_path" ]; then
-        # Read the PID from the lock file
-        local lock_data=$(cat "$lock_path" 2>/dev/null)
-        if [ -n "$lock_data" ]; then
-          local lock_timestamp=$(echo "$lock_data" | awk '{print $1" "$2}')
-          local lock_pid=$(echo "$lock_data" | awk '{print $3}')
-          
-          # Convert timestamp to seconds since epoch
-          local lock_time=$(date -j -f "%Y-%m-%d %H:%M:%S" "$lock_timestamp" "+%s" 2>/dev/null)
-          
-          # If the PID doesn't exist, or the lock is older than 10 minutes, break it
-          if ! kill -0 "$lock_pid" 2>/dev/null || [ $((current_time - lock_time)) -gt 600 ]; then
-            log_warn "Found stale lock (PID: $lock_pid not running or lock too old). Breaking."
-            rm -f "$lock_path" 2>/dev/null
-            rm -rf "$lock_path.dir" 2>/dev/null
-          fi
-        else
-          # Lock file exists but is empty or unreadable - consider it stale
-          log_warn "Found potentially corrupt lock file. Breaking."
-          rm -f "$lock_path" 2>/dev/null
-          rm -rf "$lock_path.dir" 2>/dev/null
-        fi
+
+    # Use flock for atomic lock acquisition
+    # -n = non-blocking, -x = exclusive lock
+    # Redirect FD 200 to lock file
+    if eval "exec ${lock_fd}<>\"$lock_path\"" 2>/dev/null; then
+      if eval "flock -n ${lock_fd}" 2>/dev/null; then
+        # We got the lock! Write our PID for debugging
+        echo "$(date +'%Y-%m-%d %H:%M:%S') $$" >&${lock_fd}
+        log_debug "Lock acquired using flock on FD ${lock_fd}: $lock_path"
+
+        # Store the lock FD in a global variable so we can release it later
+        LOCK_FD=${lock_fd}
+        export LOCK_FD
+
+        return 0
+      else
+        # Lock is held by another process
+        # Close our file descriptor and try again
+        eval "exec ${lock_fd}>&-" 2>/dev/null
+
+        log_debug "Lock held by another process, retrying..."
+        sleep 1
+        continue
       fi
+    else
+      log_error "Failed to open lock file descriptor for: $lock_path"
+      return 1
     fi
-    
-    # Sleep briefly before trying again
-    sleep 1
   done
 }
 
 # Function to release a lock
+# SECURITY FIX: Issue #28 - Uses flock file descriptor release
 release_lock() {
   local lock_path="${LOCK_FILE}"
-  
+
   log_debug "Releasing lock: $lock_path"
-  
-  # Clean up both lock file and directory
-  rm -f "$lock_path" 2>/dev/null
-  rm -rf "$lock_path.dir" 2>/dev/null
-  
-  # Close any open file descriptors for good measure
-  for fd in {200..210}; do
-    eval "exec $fd>&-" 2>/dev/null
-  done
-  
+
+  # Release flock by closing the file descriptor
+  if [ -n "${LOCK_FD:-}" ]; then
+    eval "exec ${LOCK_FD}>&-" 2>/dev/null
+    log_debug "Closed lock file descriptor: ${LOCK_FD}"
+    unset LOCK_FD
+  fi
+
+  # Note: We don't remove the lock file itself as flock manages the lock state
+  # The file can remain for debugging purposes
+
   return 0
 }
 
 # Function to clean up any locks at startup
+# SECURITY FIX: Issue #28 - Updated for flock-based locking
 clean_all_locks() {
   log_info "Cleaning up all potential lock files"
-  
-  # Clean up lock files
-  rm -f "/tmp/erase-install-wrapper-main.lock" 2>/dev/null
-  rm -rf "/tmp/erase-install-wrapper-main.lock.dir" 2>/dev/null
-  rm -f "/var/run/erase-install-wrapper.lock" 2>/dev/null
-  rm -rf "/var/run/erase-install-wrapper.lock.dir" 2>/dev/null
-  
-  # Close any potentially open file descriptors
+
+  # Close any potentially open file descriptors first
   for fd in {200..210}; do
     eval "exec $fd>&-" 2>/dev/null
   done
+
+  # Clean up lock files (flock releases automatically on process exit,
+  # but we remove the files for cleanliness)
+  rm -f "/tmp/erase-install-wrapper-main.lock" 2>/dev/null
+  rm -f "/var/run/erase-install-wrapper.lock" 2>/dev/null
+
+  # Clean up legacy .dir files from previous locking implementation
+  rm -rf "/tmp/erase-install-wrapper-main.lock.dir" 2>/dev/null
+  rm -rf "/var/run/erase-install-wrapper.lock.dir" 2>/dev/null
   
   log_debug "Lock cleanup completed"
 }
@@ -1328,13 +1679,13 @@ install_erase_install() {
   trap 'log_info "Exiting install_erase_install function at line $LINENO"' RETURN
   
   log_info "BEGIN install_erase_install function"
-  
-  # Create a temporary directory
-  local tmp; tmp=$(mktemp -d)
-  if [[ ! -d "${tmp}" ]]; then
-    log_error "Failed to create temporary directory for download."
+
+  # SECURITY FIX (Issue #23): Use create_secure_temp_dir() instead of raw mktemp
+  local tmp
+  tmp=$(create_secure_temp_dir "erase-install-download") || {
+    log_error "Failed to create secure temporary directory for download."
     return 1
-  fi
+  }
   
   log_info "Created temporary directory: ${tmp}"
   
@@ -1360,14 +1711,14 @@ install_erase_install() {
       log_info "Target URL: ${target_url}"
       
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${target_url}"; then
-        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified."
+        # SECURITY FIX (Issue #25): Verify package integrity after download
+        if verify_package_integrity "${pkg_path}" "erase-install"; then
+          log_info "Package download successful and integrity verified."
           download_success=true
         else
-          log_warn "Downloaded file is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Package integrity verification failed - removing potentially compromised file"
+          rm -f "${pkg_path}"
+          download_success=false
         fi
       else
         log_warn "Download failed from ${target_url}."
@@ -1393,14 +1744,14 @@ install_erase_install() {
       log_info "Trying URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -1421,14 +1772,14 @@ install_erase_install() {
       log_info "Trying generic URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -1553,14 +1904,14 @@ install_swiftDialog() {
       log_info "Target URL: ${target_url}"
       
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${target_url}"; then
-        local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified."
+        # SECURITY FIX (Issue #25): Verify package integrity after download
+        if verify_package_integrity "${pkg_path}" "erase-install"; then
+          log_info "Package download successful and integrity verified."
           download_success=true
         else
-          log_warn "Downloaded file is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Package integrity verification failed - removing potentially compromised file"
+          rm -f "${pkg_path}"
+          download_success=false
         fi
       else
         log_warn "Download failed from ${target_url}."
@@ -1587,14 +1938,14 @@ install_swiftDialog() {
       log_info "Trying URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -1616,14 +1967,14 @@ install_swiftDialog() {
       log_info "Trying generic URL: ${url}"
       if /usr/bin/curl -L --max-redirs 10 --connect-timeout 30 --retry 3 -o "${pkg_path}" "${url}"; then
         local file_size=$(stat -f%z "${pkg_path}" 2>/dev/null || echo "0")
-        log_info "Downloaded file size: ${file_size} bytes"
-        
-        if [[ ${file_size} -gt 1000000 ]]; then
-          log_info "Package download successful and verified from: ${url}"
+        # SECURITY FIX (Issue #25): Verify package integrity
+        if verify_package_integrity "${pkg_path}" "package"; then
+          log_info "Package download successful and integrity verified from: ${url}"
           download_success=true
           break
         else
-          log_warn "Downloaded file from ${url} is too small (${file_size} bytes) - likely not a valid package."
+          log_error "Integrity verification failed from ${url} - removing file"
+          rm -f "${pkg_path}"
         fi
       else
         log_warn "Download failed from: ${url}"
@@ -2322,9 +2673,11 @@ EOF
     
     # Validate and copy to final location
     if plutil -lint "$temp_plist" >/dev/null 2>&1; then
-      cp "$temp_plist" "${PLIST}" && chmod 644 "${PLIST}"
+      # SECURITY FIX (Issue #24): Use restrictive permissions (600) to prevent information disclosure
+      # Plist contains sensitive timing and deferral state that should only be readable by root
+      cp "$temp_plist" "${PLIST}" && chmod 600 "${PLIST}" && chown root:wheel "${PLIST}"
       rm -f "$temp_plist"
-      log_info "Successfully created and validated plist"
+      log_info "Successfully created and validated plist with secure permissions (600)"
     else
       log_error "Generated plist failed validation, using defaults commands"
       rm -f "$temp_plist"
@@ -3182,9 +3535,7 @@ create_scheduled_launchdaemon() {
   
   # Get console user for UI references
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  console_user=$(get_console_user)
   
   # 1. Create the LaunchAgent for UI display
   local agent_label="${LAUNCHDAEMON_LABEL}.ui.${run_id}"
@@ -3960,7 +4311,8 @@ log_message "Stopping running erase-install processes" | tee -a "${cleanup_log}"
 pkill -TERM -f "erase-install.sh" 2>/dev/null || true
 sleep 1
 # Force kill if still running
-pkill -9 -f "erase-install.sh" 2>/dev/null || true
+# SECURITY FIX (Issue #29): Use safe process termination
+kill_process_safely "erase-install.sh" 5 || true
 fi
 
 # Unload LaunchAgent if it exists and we have a console user
@@ -4192,9 +4544,13 @@ ABORTDAEMON
   fi
   
   # Copy the file to the final location with proper permissions
-  sudo cp "$tmp_daemon_path" "$abort_daemon_path"
-  sudo chmod 644 "$abort_daemon_path"
-  sudo chown root:wheel "$abort_daemon_path"
+  # SECURITY FIX (Issue #26): Use secure atomic installation
+  if ! install_daemon_secure "$tmp_daemon_path" "$abort_daemon_path"; then
+    log_error "Failed to install abort daemon securely"
+    rm -f "$tmp_daemon_path"
+    return 1
+  fi
+  rm -f "$tmp_daemon_path"
   
   # Clean up temp file
   rm -f "$tmp_daemon_path"
@@ -4324,9 +4680,13 @@ load_abort_daemon() {
     sudo cp "$daemon_path" "$tmp_path"
     sudo plutil -replace RunAtLoad -bool true "$tmp_path"
     if sudo plutil -lint "$tmp_path" >/dev/null 2>&1; then
-      sudo cp "$tmp_path" "$daemon_path"
-      sudo chmod 644 "$daemon_path"
-      sudo chown root:wheel "$daemon_path"
+      # SECURITY FIX (Issue #26): Use secure atomic installation
+      if ! install_daemon_secure "$tmp_path" "$daemon_path"; then
+        log_error "Failed to install daemon securely"
+        rm -f "$tmp_path"
+        return 1
+      fi
+      rm -f "$tmp_path"
       log_message "Fixed RunAtLoad setting in daemon plist"
     fi
     rm -f "$tmp_path" 2>/dev/null
@@ -5160,16 +5520,25 @@ EOT
     sed -i '' "s|__SHOW_AUTH_NOTICE__|false|g" "$watchdog_script"
   fi
   
-  # Use @ as delimiter for messages that might contain special characters
-  sed -i '' "s@__AUTH_NOTICE_TITLE__@${AUTH_NOTICE_TITLE}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_TITLE_TEST_MODE__@${AUTH_NOTICE_TITLE_TEST_MODE}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_MESSAGE__@${AUTH_NOTICE_MESSAGE}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_BUTTON__@${AUTH_NOTICE_BUTTON}@g" "$watchdog_script"
-  sed -i '' "s@__AUTH_NOTICE_ICON__@${AUTH_NOTICE_ICON}@g" "$watchdog_script"
+  # SECURITY FIX (Issue #22): Escape ALL sed substitutions to prevent command injection
+  # Use escape_sed() for all user-controlled values that could contain special characters
+  local escaped_auth_title=$(escape_sed "$AUTH_NOTICE_TITLE")
+  local escaped_auth_title_test=$(escape_sed "$AUTH_NOTICE_TITLE_TEST_MODE")
+  local escaped_auth_message=$(escape_sed "$AUTH_NOTICE_MESSAGE")
+  local escaped_auth_button=$(escape_sed "$AUTH_NOTICE_BUTTON")
+  local escaped_auth_icon=$(escape_sed "$AUTH_NOTICE_ICON")
+  local escaped_dialog_bin=$(escape_sed "$DIALOG_BIN")
+  local escaped_dialog_position=$(escape_sed "$DIALOG_POSITION")
+
+  sed -i '' "s@__AUTH_NOTICE_TITLE__@${escaped_auth_title}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_TITLE_TEST_MODE__@${escaped_auth_title_test}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_MESSAGE__@${escaped_auth_message}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_BUTTON__@${escaped_auth_button}@g" "$watchdog_script"
+  sed -i '' "s@__AUTH_NOTICE_ICON__@${escaped_auth_icon}@g" "$watchdog_script"
   sed -i '' "s|__AUTH_NOTICE_HEIGHT__|${AUTH_NOTICE_HEIGHT}|g" "$watchdog_script"
   sed -i '' "s|__AUTH_NOTICE_WIDTH__|${AUTH_NOTICE_WIDTH}|g" "$watchdog_script"
-  sed -i '' "s@__DIALOG_PATH__@${DIALOG_BIN}@g" "$watchdog_script"
-  sed -i '' "s@__DIALOG_POSITION__@${DIALOG_POSITION}@g" "$watchdog_script"
+  sed -i '' "s@__DIALOG_PATH__@${escaped_dialog_bin}@g" "$watchdog_script"
+  sed -i '' "s@__DIALOG_POSITION__@${escaped_dialog_position}@g" "$watchdog_script"
   
   # Verify script substitutions in debug mode
   if [[ "${DEBUG_MODE}" == "true" ]]; then
@@ -5293,8 +5662,7 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
   fi
   
   # Ensure proper permissions
-  sudo chown root:wheel "$daemon_path"
-  sudo chmod 644 "$daemon_path"
+  # Note: Permissions already set atomically during file write or via install_daemon_secure()
   
   # Load and verify the daemon using our helper function
   if ! load_and_verify_daemon "$daemon_path" "$daemon_label"; then
@@ -5363,10 +5731,9 @@ emergency_daemon_cleanup() {
     log_info "Emergency cleanup: forcibly removing startosinstall daemon"
     
     # Kill any related process
-    for pid in $(ps -ef | grep -i '[s]tartosinstall' | awk '{print $2}'); do
-      log_info "Killing startosinstall process: $pid"
-      kill -9 $pid 2>/dev/null
-    done
+    # SECURITY FIX (Issue #29): Use safe process termination
+    log_info "Attempting to terminate startosinstall processes..."
+    kill_process_safely "startosinstall" 10  # 10 second timeout for system process
     
     # Forcibly unload and remove
     launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
@@ -5542,27 +5909,10 @@ kill_lingering_watchdogs() {
 ########################################################################################################################################################################
 run_erase_install() {
   log_info "Starting user detection for run_erase_install"
-  
+
   # Get current console user for UI display - enhanced for robustness
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  log_debug "Detection method 1 result: '$console_user'"
-  
-  if [ -z "$console_user" ]; then
-    console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-    log_debug "Detection method 2 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ]; then
-    console_user=$(ls -l /dev/console | awk '{print $3}')
-    log_debug "Detection method 3 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
-    console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
-    log_debug "Detection method 4 result: '$console_user'"
-  fi
-  [ -z "$console_user" ] && console_user="$SUDO_USER" && log_debug "Using SUDO_USER: '$console_user'"
-  [ -z "$console_user" ] && console_user="$(id -un)" && log_debug "Using current user: '$console_user'"
-  
+  console_user=$(get_console_user)
   log_info "Detected console user: '$console_user'"
   local console_uid
   console_uid=$(id -u "$console_user")
@@ -6106,12 +6456,10 @@ validate_time() {
 
 show_prompt() {
   log_info "Displaying SwiftDialog dropdown prompt."
-  
+
   # Get console user for proper UI handling
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  console_user=$(get_console_user)
   local console_uid
   console_uid=$(id -u "$console_user" 2>/dev/null || echo "0")
   
@@ -6124,8 +6472,16 @@ show_prompt() {
   # For test mode, add indication in the dialog title
   local display_title="$DIALOG_TITLE"
   [[ "$TEST_MODE" = true ]] && display_title="${DIALOG_TITLE_TEST_MODE}"
-  
-  local raw; raw=$("${DIALOG_BIN}" --title "${display_title}" --message "${DIALOG_MESSAGE}" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${DIALOG_HEIGHT} --width ${DIALOG_WIDTH} --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont ${DIALOG_MESSAGEFONT} --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+
+  # Apply branding to dialog parameters
+  local branded_title branded_message branded_icon
+  local branding_result
+  branding_result=$(apply_branding "$display_title" "$DIALOG_MESSAGE" "$DIALOG_ICON")
+  branded_title=$(echo "$branding_result" | sed -n '1p')
+  branded_message=$(echo "$branding_result" | sed -n '2p')
+  branded_icon=$(echo "$branding_result" | sed -n '3p')
+
+  local raw; raw=$("${DIALOG_BIN}" --title "${branded_title}" --message "${branded_message}" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${DIALOG_HEIGHT} --width ${DIALOG_WIDTH} --moveable --icon "${branded_icon}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont ${DIALOG_MESSAGEFONT} --selecttitle "Select an action:" --select --selectvalues "${OPTIONS}" --selectdefault "${DIALOG_INSTALL_NOW_TEXT}" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
   local code=$?
   log_debug "SwiftDialog exit code: ${code}"
   log_debug "SwiftDialog raw output: ${raw}"
@@ -6179,7 +6535,15 @@ show_prompt() {
       # For test mode, add indication in the dialog title
       local display_title="$SCHEDULED_TITLE"
       [[ "$TEST_MODE" = true ]] && display_title="${SCHEDULED_TITLE_TEST_MODE}"
-      local sub; sub=$("${DIALOG_BIN}" --title "${display_title}" --message "Select installation time:" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${SCHEDULED_HEIGHT} --width ${SCHEDULED_WIDTH} --moveable --icon "${DIALOG_ICON}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "${SCHEDULED_DIALOG_MESSAGEFONT}" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
+
+      # Apply branding to schedule dialog
+      local sched_branding
+      sched_branding=$(apply_branding "$display_title" "Select installation time:" "$DIALOG_ICON")
+      local sched_title=$(echo "$sched_branding" | sed -n '1p')
+      local sched_message=$(echo "$sched_branding" | sed -n '2p')
+      local sched_icon=$(echo "$sched_branding" | sed -n '3p')
+
+      local sub; sub=$("${DIALOG_BIN}" --title "${sched_title}" --message "${sched_message}" --button1text "${DIALOG_CONFIRM_TEXT}" --height ${SCHEDULED_HEIGHT} --width ${SCHEDULED_WIDTH} --moveable --icon "${sched_icon}" --ontop --timeout 0 --showicon true --position "${DIALOG_POSITION}" --messagefont "${SCHEDULED_DIALOG_MESSAGEFONT}" --selecttitle "Choose time:" --select --selectvalues "${time_options}" --selectdefault "$(echo "$time_options" | cut -d',' -f1)" --jsonoutput 2>&1 | tee -a "${WRAPPER_LOG}")
       subcode=$?
       log_debug "Schedule dialog exit code: ${subcode}"
       log_debug "Schedule raw output: ${sub}"
@@ -6191,9 +6555,16 @@ show_prompt() {
       time_data=$(validate_time "$sched")
       if [[ $? -ne 0 || -z "$time_data" ]]; then
         log_warn "Invalid time selection: $sched"
-        
+
+        # Apply branding to error dialog
+        local error_branding
+        error_branding=$(apply_branding "$ERROR_DIALOG_TITLE" "$ERROR_DIALOG_MESSAGE" "$ERROR_DIALOG_ICON")
+        local error_title=$(echo "$error_branding" | sed -n '1p')
+        local error_message=$(echo "$error_branding" | sed -n '2p')
+        local error_icon=$(echo "$error_branding" | sed -n '3p')
+
         # Show error dialog
-        "${DIALOG_BIN}" --title "${ERROR_DIALOG_TITLE}" --message "${ERROR_DIALOG_MESSAGE}" --icon "${ERROR_DIALOG_ICON}" --button1text "${ERROR_CONTINUE_TEXT}" --height ${ERROR_DIALOG_HEIGHT} --width ${ERROR_DIALOG_WIDTH} --position "${DIALOG_POSITION}"
+        "${DIALOG_BIN}" --title "${error_title}" --message "${error_message}" --icon "${error_icon}" --button1text "${ERROR_CONTINUE_TEXT}" --height ${ERROR_DIALOG_HEIGHT} --width ${ERROR_DIALOG_WIDTH} --position "${DIALOG_POSITION}"
         
         # Return to main prompt instead of exiting
         show_prompt
@@ -6784,27 +7155,10 @@ if [[ "$1" == "--scheduled" ]]; then
   init_plist
   
   log_info "Starting user detection for scheduled run"
-  
+
   # Get current console user info for UI display - enhanced for robustness
   local console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  log_debug "Detection method 1 result: '$console_user'"
-  
-  if [ -z "$console_user" ]; then
-    console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-    log_debug "Detection method 2 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ]; then
-    console_user=$(ls -l /dev/console | awk '{print $3}')
-    log_debug "Detection method 3 result: '$console_user'"
-  fi
-  if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
-    console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
-    log_debug "Detection method 4 result: '$console_user'"
-  fi
-  [ -z "$console_user" ] && console_user="$SUDO_USER" && log_debug "Using SUDO_USER: '$console_user'"
-  [ -z "$console_user" ] && console_user="$(id -un)" && log_debug "Using current user: '$console_user'"
-  
+  console_user=$(get_console_user)
   log_info "Detected console user: '$console_user'"
   local console_uid
   console_uid=$(id -u "$console_user")
@@ -6826,9 +7180,12 @@ if [[ "$1" == "--scheduled" ]]; then
     end tell
   " 2>&1 | log_debug "AppleScript result: $(cat -)" || log_debug "AppleScript notification failed"
   
-  # Create a temporary script for dialog display
+  # SECURITY FIX (Issue #23): Create temporary script for dialog display using secure temp dir
   log_debug "Creating temporary script for dialog display"
-  TMP_DIR=$(mktemp -d)
+  TMP_DIR=$(create_secure_temp_dir "scheduled-dialog") || {
+    log_error "Failed to create secure temp directory for dialog script"
+    return 1
+  }
   TMP_DIALOG_SCRIPT="$TMP_DIR/dialog_display.sh"
   
   # Create the script with all variables expanded now
@@ -7250,9 +7607,7 @@ elif check_os_already_updated; then
   
   # Show a notification to the user
   console_user=""
-  console_user=$(stat -f%Su /dev/console 2>/dev/null || echo "")
-  [ -z "$console_user" ] && console_user=$(who | grep "console" | awk '{print $1}' | head -n1)
-  [ -z "$console_user" ] && console_user=$(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ && !/loginwindow/ { print $3 }')
+  console_user=$(get_console_user)
   
   if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
     console_uid=""
