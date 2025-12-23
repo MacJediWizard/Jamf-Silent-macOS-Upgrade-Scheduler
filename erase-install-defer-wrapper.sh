@@ -3039,6 +3039,11 @@ remove_existing_launchdaemon() {
   # First forcefully remove lingering entries from launchctl
   for label in $(launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
     if [ -n "$label" ]; then
+      # Validate label contains only safe characters to prevent command injection
+      if [[ ! "$label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        log_warn "Skipping invalid daemon label: $label"
+        continue
+      fi
       # Skip if this is our active relaunch daemon
       if [[ -n "$active_relaunch_daemon" && "$label" == "$active_relaunch_daemon" ]]; then
         log_info "Preserving active relaunch daemon: $label"
@@ -3080,6 +3085,11 @@ remove_existing_launchdaemon() {
     if [ -n "$user_id" ]; then
       for label in $(launchctl asuser "$user_id" launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
         if [ -n "$label" ]; then
+          # Validate label contains only safe characters to prevent command injection
+          if [[ ! "$label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            log_warn "Skipping invalid agent label: $label"
+            continue
+          fi
           # Skip if this relates to our active relaunch daemon
           if [[ -n "$active_relaunch_daemon" && "$label" == *"$active_relaunch_daemon"* ]]; then
             log_info "Preserving user-level agent related to active relaunch daemon: $label"
@@ -3119,7 +3129,13 @@ remove_existing_launchdaemon() {
     log_debug "Found loaded daemons: ${loaded_daemons}"
     while IFS= read -r label; do
       [ -z "${label}" ] && continue
-      
+
+      # Validate label contains only safe characters to prevent command injection
+      if [[ ! "$label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        log_warn "Skipping invalid daemon label: $label"
+        continue
+      fi
+
       # Skip if this is our active relaunch daemon
       if [[ -n "$active_relaunch_daemon" && "$label" == "$active_relaunch_daemon" ]]; then
         log_info "Preserving active relaunch daemon: ${label}"
@@ -3360,12 +3376,17 @@ remove_existing_launchdaemon() {
       log_warn "Some launch items may still be registered despite cleanup"
       # Force unload all remaining items except our active relaunch daemon
       for label in $(launchctl list 2>/dev/null | grep -E "com.macjediwizard.eraseinstall|com.github.grahampugh.erase-install" | awk '{print $3}'); do
+        # Validate label contains only safe characters to prevent command injection
+        if [[ ! "$label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+          log_warn "Skipping invalid daemon label: $label"
+          continue
+        fi
         # Skip if this is our active relaunch daemon
         if [[ -n "$active_relaunch_daemon" && "$label" == "$active_relaunch_daemon" ]]; then
           log_info "Preserving active relaunch daemon in final verification: ${label}"
           continue
         fi
-        
+
         log_info "Final attempt to remove daemon: $label"
         sudo launchctl remove "$label" 2>/dev/null
       done
@@ -3377,13 +3398,19 @@ remove_existing_launchdaemon() {
         if [ -f "$daemon" ]; then
           # Get the daemon label (filename without path or extension)
           local daemon_label=$(basename "$daemon" .plist)
-          
+
+          # Validate label contains only safe characters to prevent command injection
+          if [[ ! "$daemon_label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            log_warn "Skipping invalid daemon label: $daemon_label"
+            continue
+          fi
+
           # Skip if this is our active relaunch daemon
           if [[ -n "$active_relaunch_daemon" && "$daemon_label" == "$active_relaunch_daemon" ]]; then
             log_info "Preserving active relaunch daemon in problematic check: ${daemon}"
             continue
           fi
-          
+
           log_warn "Critical: Found problematic daemon after cleanup: $daemon"
           # Try to unload it
           sudo launchctl remove "$daemon_label" 2>/dev/null
@@ -3460,6 +3487,11 @@ post_erase_install_cleanup() {
       if [ -f "$watchdog" ]; then
         log_warn "Found lingering watchdog daemon: $watchdog"
         label=$(basename "$watchdog" .plist)
+        # Validate label contains only safe characters to prevent command injection
+        if [[ ! "$label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+          log_warn "Skipping invalid watchdog daemon label: $label"
+          continue
+        fi
         sudo launchctl remove "$label" 2>/dev/null
         sudo launchctl bootout system/$label 2>/dev/null
         sudo rm -f "$watchdog"
@@ -4452,6 +4484,11 @@ log_message "CLEANUP PHASE 4: Starting background cleanup process" | tee -a "${c
       
       echo "$(date '+%Y-%m-%d %H:%M:%S') Found lingering daemon: $daemon_path" >> "${cleanup_log}"
       daemon_label=$(basename "$daemon_path" .plist)
+      # Validate label contains only safe characters to prevent command injection
+      if [[ ! "$daemon_label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') Skipping invalid daemon label: $daemon_label" >> "${cleanup_log}"
+        continue
+      fi
       sudo launchctl remove "$daemon_label" 2>/dev/null || true
       sudo rm -f "$daemon_path" 2>/dev/null || true
     fi
@@ -5782,6 +5819,11 @@ emergency_daemon_cleanup() {
           log_info "Emergency cleanup: removing $file"
           # Get the label from the filename
           local label=$(basename "$file" .plist)
+          # Validate label contains only safe characters to prevent command injection
+          if [[ ! "$label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            log_warn "Skipping invalid daemon label: $label"
+            continue
+          fi
           # Try to unload it
           launchctl remove "$label" 2>/dev/null
           launchctl bootout system/"$label" 2>/dev/null
@@ -5798,6 +5840,11 @@ emergency_daemon_cleanup() {
         log_info "Emergency cleanup: removing user agent $file"
         local user_id=$(id -u "$user" 2>/dev/null)
         local label=$(basename "$file" .plist)
+        # Validate label contains only safe characters to prevent command injection
+        if [[ ! "$label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+          log_warn "Skipping invalid agent label: $label"
+          continue
+        fi
         launchctl asuser "$user_id" launchctl remove "$label" 2>/dev/null
         rm -f "$file"
       fi
@@ -5847,10 +5894,16 @@ verify_complete_system_cleanup() {
   for daemon in /Library/LaunchDaemons/com.macjediwizard.eraseinstall.*.plist; do
     # Skip if glob doesn't match any files
     [ ! -f "$daemon" ] && continue
-    
+
     # Get the daemon label (filename without path or extension)
     local daemon_label=$(basename "$daemon" .plist)
-    
+
+    # Validate label contains only safe characters to prevent command injection
+    if [[ ! "$daemon_label" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      log_warn "Skipping invalid daemon label: $daemon_label"
+      continue
+    fi
+
     # Skip abort daemons that are active
     if [[ "$daemon_label" == *".abort."* ]] && echo "$active_abort_daemons" | grep -q "$daemon_label"; then
       log_info "Preserving active abort daemon: $daemon"
