@@ -11,3 +11,13 @@
 tmp/
 temp/
 GetLatestVersionVIAGrahamOrSofa-Testing..sh
+
+# Development/Internal Documentation (keep local only)
+V2.0_CONFIG_PROFILE_IMPLEMENTATION.md
+V2.0_DEVELOPMENT_COMPLETE.md
+V2.0_FEATURE_SUMMARY.md
+V2.0_JSON_CONFIG_IMPLEMENTATION.md
+V2.0_TESTING_CHECKLIST.md
+V2.0_VALIDATION_SUMMARY.md
+TESTING_v2.1.1_REBOOT_FIX.md
+TESTING_*.md
