@@ -677,7 +677,7 @@ kill_process_safely() {
 
     # Send SIGTERM for graceful shutdown
     for pid in $pids; do
-        if kill -0 "$pid" 2>/dev/null; then
+        if ps -p "$pid" >/dev/null 2>&1; then
             log_info "Sending SIGTERM to PID $pid for graceful shutdown"
             kill -TERM "$pid" 2>/dev/null || true
         fi
@@ -700,7 +700,7 @@ kill_process_safely() {
     if [[ -n "$pids" ]]; then
         log_warn "Processes did not terminate gracefully, sending SIGKILL to: $pids"
         for pid in $pids; do
-            if kill -0 "$pid" 2>/dev/null; then
+            if ps -p "$pid" >/dev/null 2>&1; then
                 kill -KILL "$pid" 2>/dev/null || true
             fi
         done
@@ -1473,7 +1473,7 @@ EOFSCRIPT
       fi
       
       # Check if the process is still running
-      if ! kill -0 $script_pid 2>/dev/null; then
+      if ! ps -p $script_pid >/dev/null 2>&1; then
         log_debug "Script process completed after ${counter} seconds"
         # Give it a moment for the result file to be written
         sleep 2
@@ -1508,7 +1508,7 @@ EOFSCRIPT
       log_warn "No result file found after ${counter} seconds, checking script status"
       
       # Check if the script process is still running
-      if kill -0 $script_pid 2>/dev/null; then
+      if ps -p $script_pid >/dev/null 2>&1; then
         log_warn "Script still running after timeout, killing it"
         kill -TERM $script_pid 2>/dev/null
         sleep 2
@@ -6194,7 +6194,7 @@ show_preinstall() {
   # Update countdown progress
   while [[ $countdown_remaining -gt 0 ]]; do
     # Check if the dialog is still running
-    if ! kill -0 $dialog_pid 2>/dev/null; then
+    if ! ps -p $dialog_pid >/dev/null 2>&1; then
       dialog_closed=true
       log_info "Pre-install dialog closed by user, continuing immediately"
       break
@@ -6212,7 +6212,7 @@ show_preinstall() {
   done
   
   # Kill dialog if still running
-  if ! $dialog_closed && kill -0 $dialog_pid 2>/dev/null; then
+  if ! $dialog_closed && ps -p $dialog_pid >/dev/null 2>&1; then
     kill $dialog_pid 2>/dev/null
   fi
   
