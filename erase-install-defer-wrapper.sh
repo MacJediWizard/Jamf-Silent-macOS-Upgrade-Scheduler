@@ -209,7 +209,7 @@ trap 'error_handler ${LINENO} ${BASH_LINENO} "$BASH_COMMAND" $?' ERR
 ########################################################################################################################################################################
 #
 # ---- Core Settings ----
-SCRIPT_VERSION="2.0.0"              # Current version of this script
+SCRIPT_VERSION="2.1.1"              # Current version of this script
 INSTALLER_OS="15"                   # Target macOS version number to install in prompts
 MAX_DEFERS=3                        # Maximum number of times a user can defer installation
 FORCE_TIMEOUT_SECONDS=259200        # Force installation after timeout (72 hours = 259200 seconds)
@@ -839,7 +839,7 @@ load_json_config() {
     }
 
     # Load Core Settings
-    SCRIPT_VERSION=$(read_json "core_settings.SCRIPT_VERSION" "2.0.0")
+    SCRIPT_VERSION=$(read_json "core_settings.SCRIPT_VERSION" "2.1.1")
     INSTALLER_OS=$(read_json "core_settings.INSTALLER_OS" "15")
     MAX_DEFERS=$(read_json "core_settings.MAX_DEFERS" "3")
     FORCE_TIMEOUT_SECONDS=$(read_json "core_settings.FORCE_TIMEOUT_SECONDS" "259200")
