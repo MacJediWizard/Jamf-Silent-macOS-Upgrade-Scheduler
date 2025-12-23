@@ -3097,13 +3097,18 @@ remove_existing_launchdaemon() {
     fi
   done
   
-  # Handle the erase-install startosinstall plist specifically - CRITICAL ADDITION
+  # Handle the erase-install startosinstall plist specifically
+  # CRITICAL: Only remove if startosinstall process is NOT actively running
   if [ -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist" ]; then
-    log_info "Directly handling com.github.grahampugh.erase-install.startosinstall.plist"
-    sudo launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
-    sudo launchctl bootout system/com.github.grahampugh.erase-install.startosinstall 2>/dev/null
-    sudo rm -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
-    log_info "Removed com.github.grahampugh.erase-install.startosinstall.plist"
+    if pgrep -f "startosinstall" > /dev/null 2>&1; then
+      log_info "PROTECTED: startosinstall is actively running - preserving its LaunchDaemon for reboot"
+    else
+      log_info "Removing stale startosinstall LaunchDaemon (no active process)"
+      sudo launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>/dev/null
+      sudo launchctl bootout system/com.github.grahampugh.erase-install.startosinstall 2>/dev/null
+      sudo rm -f "/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
+      log_info "Removed com.github.grahampugh.erase-install.startosinstall.plist"
+    fi
   fi
   
   # Get a list of loaded daemons
@@ -3414,7 +3419,13 @@ remove_existing_launchdaemon() {
 # Function to ensure cleanup after erase-install runs
 post_erase_install_cleanup() {
   log_info "Performing post-installation cleanup"
-  
+
+  # CRITICAL FIX: Do NOT clean up if startosinstall is actively running (reboot in progress)
+  if pgrep -f "startosinstall" > /dev/null 2>&1; then
+    log_info "startosinstall is actively running - reboot in progress, skipping ALL cleanup"
+    return 0
+  fi
+
   # Wait briefly to ensure erase-install completes its operations
   sleep 5
   
@@ -5701,8 +5712,15 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
 # Function to perform emergency cleanup of all known daemons
 emergency_daemon_cleanup() {
   local preserve_parent_daemon="${1:-false}"
+
+  # CRITICAL: Never run emergency cleanup if startosinstall is running (reboot in progress)
+  if pgrep -f "startosinstall" > /dev/null 2>&1; then
+    log_info "EMERGENCY CLEANUP ABORTED: startosinstall is running - reboot in progress"
+    return 0
+  fi
+
   log_info "Performing emergency cleanup of all LaunchDaemons"
-  
+
   # Get parent process info for preservation if needed
   local parent_daemon_label=""
   if [[ "$preserve_parent_daemon" == "true" ]] && [ -n "$PPID" ]; then
@@ -7070,8 +7088,15 @@ if [[ "$1" == "--scheduled" ]]; then
   # Define cleanup function
   cleanup_and_exit() {
     local exit_code=$?
+
+    # CRITICAL: Don't cleanup if startosinstall is running (reboot in progress)
+    if pgrep -f "startosinstall" > /dev/null 2>&1; then
+      log_info "Reboot in progress (startosinstall running) - exiting without cleanup"
+      exit $exit_code
+    fi
+
     log_info "Cleaning up scheduled installation process"
-    
+
     # Kill any lingering watchdog processes
     kill_lingering_watchdogs
     
