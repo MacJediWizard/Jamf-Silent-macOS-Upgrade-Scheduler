@@ -21,3 +21,9 @@ V2.0_TESTING_CHECKLIST.md
 V2.0_VALIDATION_SUMMARY.md
 TESTING_v2.1.1_REBOOT_FIX.md
 TESTING_*.md
+
+# Testing/Development Scripts (keep local only)
+pre-merge-validation.sh
+test-json-config.sh
+test-wrapper.sh
+test-*.sh
