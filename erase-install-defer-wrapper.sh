@@ -5950,6 +5950,40 @@ if [ $RESULT -eq 0 ]; then
   defaults write "${PLIST}" abortCount -int 0
   defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
   log_message "All counters reset successfully"
+
+  # PREVENT_ALL_REBOOTS notification after successful preparation (GitHub Issue #37)
+  if [ "$PREVENT_ALL_REBOOTS" = "true" ]; then
+    log_message "PREVENT_ALL_REBOOTS: Installation prepared successfully - showing manual reboot notification"
+    log_message "System is ready for upgrade. User must reboot manually to complete installation."
+
+    # Show dialog to user if swiftDialog is available
+    if [ -f "${DIALOG_PATH}" ] && [ -x "${DIALOG_PATH}" ]; then
+      # Get console user for dialog display
+      local_console_user=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
+      local_console_uid=$(id -u "$local_console_user" 2>/dev/null || echo "")
+
+      if [ -n "$local_console_uid" ] && [ "$local_console_uid" != "0" ]; then
+        log_message "Displaying manual reboot notification dialog to user: $local_console_user"
+
+        # Run dialog as the console user for proper display
+        launchctl asuser "$local_console_uid" sudo -u "$local_console_user" "${DIALOG_PATH}" \
+          --title "macOS Upgrade Ready - Manual Reboot Required" \
+          --message "macOS ${INSTALLER_OS} has been downloaded and is ready to install.\n\nPlease save your work and restart your computer when convenient.\n\nThe upgrade will begin automatically after restart." \
+          --button1text "OK" \
+          --icon "SF=arrow.clockwise.circle,weight=bold,colour=blue" \
+          --height 220 \
+          --width 500 \
+          --position center \
+          --ontop 2>/dev/null || log_message "Failed to display manual reboot notification dialog"
+      else
+        log_message "No console user available to display manual reboot notification"
+      fi
+    else
+      log_message "swiftDialog not available - cannot show manual reboot notification"
+    fi
+
+    log_message "PREVENT_ALL_REBOOTS: Exiting successfully - upgrade is prepared but reboot was prevented"
+  fi
 fi
 
 # Enhanced error logging for power-related issues
@@ -6612,12 +6646,20 @@ run_erase_install() {
     cmd_args+=("--test-run")
     log_debug "Test mode enabled"
   fi
-  
+
+  # PREVENT_ALL_REBOOTS implementation (GitHub Issue #37)
+  # When enabled, add --no-reboot flag to prepare installation without automatic reboot
+  if [[ "$PREVENT_ALL_REBOOTS" == "true" ]]; then
+    cmd_args+=("--no-reboot")
+    log_warn "PREVENT_ALL_REBOOTS is enabled - installation will be prepared but reboot prevented"
+    log_info "User must manually reboot to complete the macOS upgrade"
+  fi
+
   if [[ "$DEBUG_MODE" == "true" ]]; then
     cmd_args+=("--verbose")
     log_debug "Verbose logging enabled for erase-install"
   fi
-  
+
   # Execute with proper error handling
   if ! sudo "${cmd_args[@]}"; then
     local exit_code=$?
@@ -6639,17 +6681,53 @@ run_erase_install() {
   
   # Add cleanup after successful run
   post_erase_install_cleanup
-  
+
+  # PREVENT_ALL_REBOOTS notification (GitHub Issue #37)
+  # When reboot prevention is enabled, show dialog informing user to reboot manually
+  if [[ "$PREVENT_ALL_REBOOTS" == "true" ]]; then
+    log_info "PREVENT_ALL_REBOOTS: Installation prepared successfully - showing manual reboot notification"
+    log_warn "System is ready for upgrade. User must reboot manually to complete installation."
+
+    # Show dialog to user if swiftDialog is available
+    if [[ -f "${DIALOG_BIN}" && -x "${DIALOG_BIN}" ]]; then
+      local console_user
+      console_user=$(get_console_user)
+      local console_uid
+      console_uid=$(id -u "$console_user" 2>/dev/null || echo "")
+
+      if [[ -n "$console_uid" && "$console_uid" != "0" ]]; then
+        log_info "Displaying manual reboot notification dialog to user: $console_user"
+
+        # Run dialog as the console user for proper display
+        launchctl asuser "$console_uid" sudo -u "$console_user" "${DIALOG_BIN}" \
+          --title "macOS Upgrade Ready - Manual Reboot Required" \
+          --message "macOS ${INSTALLER_OS} has been downloaded and is ready to install.\n\nPlease save your work and restart your computer when convenient.\n\nThe upgrade will begin automatically after restart." \
+          --button1text "OK" \
+          --icon "SF=arrow.clockwise.circle,weight=bold,colour=blue" \
+          --height 220 \
+          --width 500 \
+          --position center \
+          --ontop 2>/dev/null || log_warn "Failed to display manual reboot notification dialog"
+      else
+        log_warn "No console user available to display manual reboot notification"
+      fi
+    else
+      log_warn "swiftDialog not available at ${DIALOG_BIN} - cannot show manual reboot notification"
+    fi
+
+    log_info "PREVENT_ALL_REBOOTS: Exiting successfully - upgrade is prepared but reboot was prevented"
+  fi
+
   # Clean up after test run
   if [[ "$TEST_MODE" = true ]]; then
     log_info "Test run completed successfully"
     remove_existing_launchdaemon
   fi
-  
+
   # IMPORTANT: Only reset deferrals after successful installation
   log_info "Installation completed successfully. Resetting deferral and abort counts."
   reset_all_counters
-  
+
   return 0
 }
 
@@ -7875,26 +7953,66 @@ EOF
     if [[ "$TEST_MODE" == "true" ]]; then
       cmd_args+=("--test-run")
     fi
-    
+
+    # PREVENT_ALL_REBOOTS implementation (GitHub Issue #37)
+    # When enabled, add --no-reboot flag to prepare installation without automatic reboot
     if [[ "$PREVENT_ALL_REBOOTS" == "true" ]]; then
       cmd_args+=("--no-reboot")
+      log_warn "PREVENT_ALL_REBOOTS is enabled - installation will be prepared but reboot prevented"
+      log_info "User must manually reboot to complete the macOS upgrade"
     fi
-    
+
     if [[ "$DEBUG_MODE" == "true" ]]; then
       cmd_args+=("--verbose")
     fi
-    
+
     # Log the command
     log_info "Executing erase-install with arguments: ${cmd_args[*]}"
-    
+
     # Execute the command
-    "${cmd_args[@]}"
+    local erase_result=0
+    "${cmd_args[@]}" || erase_result=$?
+
+    # PREVENT_ALL_REBOOTS notification after successful preparation (GitHub Issue #37)
+    if [[ "$PREVENT_ALL_REBOOTS" == "true" && $erase_result -eq 0 ]]; then
+      log_info "PREVENT_ALL_REBOOTS: Installation prepared successfully - showing manual reboot notification"
+      log_warn "System is ready for upgrade. User must reboot manually to complete installation."
+
+      # Show dialog to user if swiftDialog is available
+      if [[ -f "${DIALOG_BIN}" && -x "${DIALOG_BIN}" ]]; then
+        local notify_user
+        notify_user=$(get_console_user)
+        local notify_uid
+        notify_uid=$(id -u "$notify_user" 2>/dev/null || echo "")
+
+        if [[ -n "$notify_uid" && "$notify_uid" != "0" ]]; then
+          log_info "Displaying manual reboot notification dialog to user: $notify_user"
+
+          # Run dialog as the console user for proper display
+          launchctl asuser "$notify_uid" sudo -u "$notify_user" "${DIALOG_BIN}" \
+            --title "macOS Upgrade Ready - Manual Reboot Required" \
+            --message "macOS ${INSTALLER_OS} has been downloaded and is ready to install.\n\nPlease save your work and restart your computer when convenient.\n\nThe upgrade will begin automatically after restart." \
+            --button1text "OK" \
+            --icon "SF=arrow.clockwise.circle,weight=bold,colour=blue" \
+            --height 220 \
+            --width 500 \
+            --position center \
+            --ontop 2>/dev/null || log_warn "Failed to display manual reboot notification dialog"
+        else
+          log_warn "No console user available to display manual reboot notification"
+        fi
+      else
+        log_warn "swiftDialog not available at ${DIALOG_BIN} - cannot show manual reboot notification"
+      fi
+
+      log_info "PREVENT_ALL_REBOOTS: Exiting successfully - upgrade is prepared but reboot was prevented"
+    fi
   else
     # When running as user, we need to use the normal run_erase_install function
     log_info "Running erase-install via run_erase_install function"
     run_erase_install
   fi
-  
+
   # Explicitly call cleanup to ensure proper exit
   cleanup_and_exit
 fi
