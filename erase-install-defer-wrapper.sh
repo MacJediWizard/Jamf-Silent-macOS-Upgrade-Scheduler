@@ -3720,11 +3720,32 @@ remove_existing_launchdaemon() {
     if [[ -n "$active_relaunch_daemon" ]]; then
       # Extract ID from the relaunch daemon label
       local active_id=$(echo "$active_relaunch_daemon" | grep -o '[0-9]\{14\}' || echo "")
-      
+
       if [[ -n "$active_id" ]]; then
-        log_info "Preserving watchdog scripts for active ID: $active_id"
-        # Remove other watchdog scripts
-        sudo find "/Library/Management/erase-install" -name "erase-install-watchdog-*.sh" -not -name "*${active_id}*" -delete 2>/dev/null
+        # Validate active_id format (must be 14+ digit timestamp)
+        if [[ ! "$active_id" =~ ^[0-9]{14,}$ ]]; then
+          log_error "active_id has unexpected format: $active_id - refusing to run watchdog cleanup"
+        else
+          log_info "Preserving watchdog scripts for active ID: $active_id"
+          # Safe explicit file removal with validation
+          for watchdog_file in /Library/Management/erase-install/erase-install-watchdog-*.sh; do
+            [[ -f "$watchdog_file" ]] || continue
+
+            # Check if file should be preserved (contains active_id)
+            if [[ "$watchdog_file" == *"${active_id}"* ]]; then
+              log_info "Preserving active watchdog: $watchdog_file"
+              continue
+            fi
+
+            # Delete with explicit path and logging
+            log_info "Removing old watchdog: $watchdog_file"
+            if sudo rm -f "$watchdog_file"; then
+              log_debug "Successfully removed watchdog: $watchdog_file"
+            else
+              log_warn "Failed to remove watchdog: $watchdog_file"
+            fi
+          done
+        fi
       else
         sudo rm -f "/Library/Management/erase-install/erase-install-watchdog-*.sh" 2>/dev/null
       fi
@@ -3734,13 +3755,41 @@ remove_existing_launchdaemon() {
     
     # For helper scripts in user directories, preserve active ones
     for user in $(ls /Users); do
+      # Validate username contains only safe characters to prevent path traversal
+      if [[ ! "$user" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        log_warn "Skipping invalid username: $user"
+        continue
+      fi
+
       if [[ -n "$active_relaunch_daemon" ]]; then
         # Extract ID from the relaunch daemon label
         local active_id=$(echo "$active_relaunch_daemon" | grep -o '[0-9]\{14\}' || echo "")
-        
+
         if [[ -n "$active_id" ]]; then
-          # Remove other helper scripts
-          sudo -u "$user" find "/Users/$user/Library/Application Support" -name "erase-install-helper-*.sh" -not -name "*${active_id}*" -delete 2>/dev/null
+          # Validate active_id format (must be 14+ digit timestamp)
+          if [[ ! "$active_id" =~ ^[0-9]{14,}$ ]]; then
+            log_error "active_id has unexpected format: $active_id - refusing to run helper cleanup for user $user"
+            continue
+          fi
+
+          # Safe explicit file removal with validation
+          for helper_file in "/Users/$user/Library/Application Support"/erase-install-helper-*.sh; do
+            [[ -f "$helper_file" ]] || continue
+
+            # Check if file should be preserved (contains active_id)
+            if [[ "$helper_file" == *"${active_id}"* ]]; then
+              log_info "Preserving active helper script: $helper_file"
+              continue
+            fi
+
+            # Delete with explicit path and logging
+            log_info "Removing old helper script: $helper_file"
+            if sudo -u "$user" rm -f "$helper_file"; then
+              log_debug "Successfully removed helper: $helper_file"
+            else
+              log_warn "Failed to remove helper: $helper_file"
+            fi
+          done
         else
           sudo -u "$user" rm -f "/Users/$user/Library/Application Support/erase-install-helper-*.sh" 2>/dev/null
         fi
@@ -3753,10 +3802,31 @@ remove_existing_launchdaemon() {
     if [[ -n "$active_relaunch_daemon" ]]; then
       # Extract ID from the relaunch daemon label
       local active_id=$(echo "$active_relaunch_daemon" | grep -o '[0-9]\{14\}' || echo "")
-      
+
       if [[ -n "$active_id" ]]; then
-        # Remove other trigger files
-        sudo find "/var/tmp" -name "erase-install-trigger-*" -not -name "*${active_id}*" -delete 2>/dev/null
+        # Validate active_id format (must be 14+ digit timestamp)
+        if [[ ! "$active_id" =~ ^[0-9]{14,}$ ]]; then
+          log_error "active_id has unexpected format: $active_id - refusing to run trigger cleanup"
+        else
+          # Safe explicit file removal with validation
+          for trigger_file in /var/tmp/erase-install-trigger-*; do
+            [[ -f "$trigger_file" ]] || continue
+
+            # Check if file should be preserved (contains active_id)
+            if [[ "$trigger_file" == *"${active_id}"* ]]; then
+              log_info "Preserving active trigger file: $trigger_file"
+              continue
+            fi
+
+            # Delete with explicit path and logging
+            log_info "Removing old trigger file: $trigger_file"
+            if sudo rm -f "$trigger_file"; then
+              log_debug "Successfully removed trigger: $trigger_file"
+            else
+              log_warn "Failed to remove trigger: $trigger_file"
+            fi
+          done
+        fi
       else
         sudo rm -f /var/tmp/erase-install-trigger* 2>/dev/null
       fi
