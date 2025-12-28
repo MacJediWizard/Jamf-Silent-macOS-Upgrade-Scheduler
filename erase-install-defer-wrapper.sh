@@ -482,6 +482,180 @@ validate_path() {
 }
 
 #######################################
+# SECURITY: Validate semantic version format (Issue #35)
+# Arguments:
+#   $1 - Version string to validate
+# Returns:
+#   0 if valid semver format, 1 if invalid
+#######################################
+validate_semver() {
+    local version="$1"
+
+    # Semver format: MAJOR.MINOR.PATCH (all numeric)
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "[ERROR] Invalid semver format: $version (expected X.Y.Z)" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+#######################################
+# SECURITY: Validate boolean value (Issue #35)
+# Arguments:
+#   $1 - Value to validate
+#   $2 - Default value if invalid
+# Returns:
+#   Validated boolean ("true" or "false")
+#######################################
+validate_boolean() {
+    local value="$1"
+    local default="${2:-false}"
+
+    # Convert to lowercase for comparison
+    value=$(echo "$value" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$value" == "true" || "$value" == "false" ]]; then
+        echo "$value"
+        return 0
+    fi
+
+    # Handle common boolean representations
+    if [[ "$value" == "1" || "$value" == "yes" || "$value" == "on" ]]; then
+        echo "true"
+        return 0
+    fi
+
+    if [[ "$value" == "0" || "$value" == "no" || "$value" == "off" ]]; then
+        echo "false"
+        return 0
+    fi
+
+    # Invalid value, return default
+    echo "[ERROR] Invalid boolean value: $value (expected true/false)" >&2
+    echo "$default"
+    return 1
+}
+
+#######################################
+# SECURITY: Validate string length (Issue #35)
+# Arguments:
+#   $1 - String to validate
+#   $2 - Maximum length (default: 1024)
+#   $3 - Variable name (for error message)
+# Returns:
+#   0 if valid, 1 if too long
+#######################################
+validate_string_length() {
+    local value="$1"
+    local max_length="${2:-1024}"
+    local var_name="${3:-value}"
+
+    if [[ ${#value} -gt $max_length ]]; then
+        echo "[ERROR] String too long: $var_name (${#value} > $max_length chars)" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+#######################################
+# SECURITY: Validate OS version against whitelist (Issue #35)
+# Arguments:
+#   $1 - OS version number
+#   $2 - Default value if invalid
+# Returns:
+#   Validated OS version
+#######################################
+validate_os_version() {
+    local version="$1"
+    local default="${2:-15}"
+
+    # Whitelist of supported macOS versions
+    # macOS 13 = Ventura, 14 = Sonoma, 15 = Sequoia, 16+ = future
+    local -a ALLOWED_OS_VERSIONS=(13 14 15 16 17)
+
+    # First check if numeric
+    if [[ ! "$version" =~ ^[0-9]+$ ]]; then
+        echo "[ERROR] Invalid INSTALLER_OS: must be numeric" >&2
+        echo "$default"
+        return 1
+    fi
+
+    # Check against whitelist
+    local found=false
+    for allowed in "${ALLOWED_OS_VERSIONS[@]}"; do
+        if [[ "$version" == "$allowed" ]]; then
+            found=true
+            break
+        fi
+    done
+
+    if [[ "$found" != "true" ]]; then
+        echo "[ERROR] Unsupported OS version: $version (allowed: ${ALLOWED_OS_VERSIONS[*]})" >&2
+        echo "$default"
+        return 1
+    fi
+
+    echo "$version"
+    return 0
+}
+
+#######################################
+# SECURITY: Sanitize string for shell safety (Issue #35)
+# Removes potentially dangerous characters
+# Arguments:
+#   $1 - String to sanitize
+# Returns:
+#   Sanitized string
+#######################################
+sanitize_string() {
+    local value="$1"
+
+    # Remove null bytes
+    value="${value//$'\0'/}"
+
+    # Remove command substitution characters
+    value="${value//\`/}"
+    value="${value//\$(/}"
+    value="${value//\$\{/}"
+
+    # Remove shell metacharacters that could cause issues
+    value="${value//;/}"
+    value="${value//|/}"
+    value="${value//&/}"
+
+    echo "$value"
+}
+
+#######################################
+# SECURITY: Validate dialog position (Issue #35)
+# Arguments:
+#   $1 - Position value
+#   $2 - Default value
+# Returns:
+#   Validated position
+#######################################
+validate_dialog_position() {
+    local position="$1"
+    local default="${2:-topright}"
+
+    # Whitelist of valid positions
+    local -a VALID_POSITIONS=(topleft topright center bottomleft bottomright)
+
+    for valid in "${VALID_POSITIONS[@]}"; do
+        if [[ "$position" == "$valid" ]]; then
+            echo "$position"
+            return 0
+        fi
+    done
+
+    echo "[ERROR] Invalid dialog position: $position" >&2
+    echo "$default"
+    return 1
+}
+
+#######################################
 # SECURITY: Create secure temporary file with mktemp
 # Arguments:
 #   $1 - Template name (e.g., "dialog-script")
@@ -983,32 +1157,50 @@ load_json_config() {
     ABORT_WIDTH=$(read_json "abort_button.ABORT_WIDTH" "750")
     ABORT_ICON=$(read_json "abort_button.ABORT_ICON" "SF=exclamationmark.triangle")
 
-    # SECURITY: Validate all numeric settings
+    # ========================================
+    # SECURITY: Comprehensive JSON Value Validation (Issue #35)
+    # ========================================
+    echo "[CONFIG] Validating JSON configuration values..." >&2
     local validated_value
+    local validation_errors=0
 
-    # Core settings
-    validated_value=$(validate_positive_integer "$INSTALLER_OS" "15" "99" "false")
+    # --- SCRIPT_VERSION: Validate semver format ---
+    if ! validate_semver "$SCRIPT_VERSION"; then
+        echo "[CONFIG] WARNING: SCRIPT_VERSION ($SCRIPT_VERSION) is invalid, using default: 2.1.1" >&2
+        SCRIPT_VERSION="2.1.1"
+        ((validation_errors++))
+    fi
+
+    # --- INSTALLER_OS: Validate against whitelist ---
+    validated_value=$(validate_os_version "$INSTALLER_OS" "15")
     if [[ "$validated_value" != "$INSTALLER_OS" ]]; then
-        echo "[CONFIG] WARNING: INSTALLER_OS ($INSTALLER_OS) is invalid, using default: 15" >&2
-        INSTALLER_OS="15"
+        echo "[CONFIG] WARNING: INSTALLER_OS ($INSTALLER_OS) failed whitelist validation, using: $validated_value" >&2
+        INSTALLER_OS="$validated_value"
+        ((validation_errors++))
     fi
 
-    validated_value=$(validate_positive_integer "$MAX_DEFERS" "3" "100" "true")
+    # --- MAX_DEFERS: Validate range (1-99) ---
+    validated_value=$(validate_positive_integer "$MAX_DEFERS" "3" "99" "false")
     if [[ "$validated_value" != "$MAX_DEFERS" ]]; then
-        echo "[CONFIG] WARNING: MAX_DEFERS ($MAX_DEFERS) is invalid, using default: 3" >&2
+        echo "[CONFIG] WARNING: MAX_DEFERS ($MAX_DEFERS) must be 1-99, using default: 3" >&2
         MAX_DEFERS="3"
+        ((validation_errors++))
     fi
 
-    validated_value=$(validate_positive_integer "$MAX_ABORTS" "3" "100" "true")
+    # --- MAX_ABORTS: Validate range (1-99) ---
+    validated_value=$(validate_positive_integer "$MAX_ABORTS" "3" "99" "false")
     if [[ "$validated_value" != "$MAX_ABORTS" ]]; then
-        echo "[CONFIG] WARNING: MAX_ABORTS ($MAX_ABORTS) is invalid, using default: 3" >&2
+        echo "[CONFIG] WARNING: MAX_ABORTS ($MAX_ABORTS) must be 1-99, using default: 3" >&2
         MAX_ABORTS="3"
+        ((validation_errors++))
     fi
 
+    # --- FORCE_TIMEOUT_SECONDS: Validate range ---
     validated_value=$(validate_positive_integer "$FORCE_TIMEOUT_SECONDS" "259200" "604800" "false")
     if [[ "$validated_value" != "$FORCE_TIMEOUT_SECONDS" ]]; then
         echo "[CONFIG] WARNING: FORCE_TIMEOUT_SECONDS ($FORCE_TIMEOUT_SECONDS) is invalid, using default: 259200" >&2
         FORCE_TIMEOUT_SECONDS="259200"
+        ((validation_errors++))
     fi
 
     # erase-install options
@@ -1037,11 +1229,47 @@ load_json_config() {
     validated_value=$(validate_positive_integer "$DIALOG_WIDTH" "650" "3000" "false")
     [[ "$validated_value" != "$DIALOG_WIDTH" ]] && DIALOG_WIDTH="650"
 
+    validated_value=$(validate_positive_integer "$PREINSTALL_HEIGHT" "350" "2000" "false")
+    [[ "$validated_value" != "$PREINSTALL_HEIGHT" ]] && PREINSTALL_HEIGHT="350"
+
+    validated_value=$(validate_positive_integer "$PREINSTALL_WIDTH" "650" "3000" "false")
+    [[ "$validated_value" != "$PREINSTALL_WIDTH" ]] && PREINSTALL_WIDTH="650"
+
     validated_value=$(validate_positive_integer "$PREINSTALL_COUNTDOWN" "60" "600" "false")
     [[ "$validated_value" != "$PREINSTALL_COUNTDOWN" ]] && PREINSTALL_COUNTDOWN="60"
 
+    validated_value=$(validate_positive_integer "$SCHEDULED_HEIGHT" "250" "2000" "false")
+    [[ "$validated_value" != "$SCHEDULED_HEIGHT" ]] && SCHEDULED_HEIGHT="250"
+
+    validated_value=$(validate_positive_integer "$SCHEDULED_WIDTH" "650" "3000" "false")
+    [[ "$validated_value" != "$SCHEDULED_WIDTH" ]] && SCHEDULED_WIDTH="650"
+
+    validated_value=$(validate_positive_integer "$SCHEDULED_CONTINUE_HEIGHT" "350" "2000" "false")
+    [[ "$validated_value" != "$SCHEDULED_CONTINUE_HEIGHT" ]] && SCHEDULED_CONTINUE_HEIGHT="350"
+
+    validated_value=$(validate_positive_integer "$SCHEDULED_CONTINUE_WIDTH" "750" "3000" "false")
+    [[ "$validated_value" != "$SCHEDULED_CONTINUE_WIDTH" ]] && SCHEDULED_CONTINUE_WIDTH="750"
+
     validated_value=$(validate_positive_integer "$SCHEDULED_COUNTDOWN" "60" "600" "false")
     [[ "$validated_value" != "$SCHEDULED_COUNTDOWN" ]] && SCHEDULED_COUNTDOWN="60"
+
+    validated_value=$(validate_positive_integer "$ERROR_DIALOG_HEIGHT" "350" "2000" "false")
+    [[ "$validated_value" != "$ERROR_DIALOG_HEIGHT" ]] && ERROR_DIALOG_HEIGHT="350"
+
+    validated_value=$(validate_positive_integer "$ERROR_DIALOG_WIDTH" "650" "3000" "false")
+    [[ "$validated_value" != "$ERROR_DIALOG_WIDTH" ]] && ERROR_DIALOG_WIDTH="650"
+
+    validated_value=$(validate_positive_integer "$AUTH_NOTICE_HEIGHT" "300" "2000" "false")
+    [[ "$validated_value" != "$AUTH_NOTICE_HEIGHT" ]] && AUTH_NOTICE_HEIGHT="300"
+
+    validated_value=$(validate_positive_integer "$AUTH_NOTICE_WIDTH" "750" "3000" "false")
+    [[ "$validated_value" != "$AUTH_NOTICE_WIDTH" ]] && AUTH_NOTICE_WIDTH="750"
+
+    validated_value=$(validate_positive_integer "$ABORT_HEIGHT" "250" "2000" "false")
+    [[ "$validated_value" != "$ABORT_HEIGHT" ]] && ABORT_HEIGHT="250"
+
+    validated_value=$(validate_positive_integer "$ABORT_WIDTH" "750" "3000" "false")
+    [[ "$validated_value" != "$ABORT_WIDTH" ]] && ABORT_WIDTH="750"
 
     validated_value=$(validate_positive_integer "$AUTH_NOTICE_TIMEOUT" "0" "600" "true")
     [[ "$validated_value" != "$AUTH_NOTICE_TIMEOUT" ]] && AUTH_NOTICE_TIMEOUT="0"
@@ -1066,12 +1294,149 @@ load_json_config() {
     validated_value=$(validate_positive_integer "$LOGO_HEIGHT" "128" "512" "false")
     [[ "$validated_value" != "$LOGO_HEIGHT" ]] && LOGO_HEIGHT="128"
 
-    # Validate company logo path if branding is enabled
+    # Validate company logo path if branding is enabled (Issue #35)
     if [[ "$ENABLE_BRANDING" == "true" ]] && [[ "$USE_COMPANY_LOGO" == "true" ]]; then
-        if [[ ! -f "$COMPANY_LOGO" ]]; then
+        # First validate path for security (no traversal, valid format)
+        if ! validate_path "$COMPANY_LOGO"; then
+            echo "[CONFIG] WARNING: Invalid COMPANY_LOGO path - security check failed, using default icon" >&2
+            USE_COMPANY_LOGO="false"
+            ((validation_errors++))
+        elif [[ ! -f "$COMPANY_LOGO" ]]; then
             echo "[CONFIG] WARNING: Company logo not found at $COMPANY_LOGO - will use default icon" >&2
             USE_COMPANY_LOGO="false"
         fi
+    fi
+
+    # --- Boolean Validations (Issue #35) ---
+    echo "[CONFIG] Validating boolean values..." >&2
+
+    # Feature toggles
+    TEST_MODE=$(validate_boolean "$TEST_MODE" "false")
+    PREVENT_ALL_REBOOTS=$(validate_boolean "$PREVENT_ALL_REBOOTS" "false")
+    SKIP_OS_VERSION_CHECK=$(validate_boolean "$SKIP_OS_VERSION_CHECK" "false")
+    AUTO_INSTALL_DEPENDENCIES=$(validate_boolean "$AUTO_INSTALL_DEPENDENCIES" "true")
+    DEBUG_MODE=$(validate_boolean "$DEBUG_MODE" "false")
+
+    # erase-install options
+    REINSTALL=$(validate_boolean "$REINSTALL" "true")
+    NO_FS=$(validate_boolean "$NO_FS" "true")
+    CHECK_POWER=$(validate_boolean "$CHECK_POWER" "true")
+    CLEANUP_AFTER_USE=$(validate_boolean "$CLEANUP_AFTER_USE" "true")
+
+    # Auth notice
+    SHOW_AUTH_NOTICE=$(validate_boolean "$SHOW_AUTH_NOTICE" "true")
+
+    # Abort button
+    ENABLE_ABORT_BUTTON=$(validate_boolean "$ENABLE_ABORT_BUTTON" "true")
+
+    # Branding
+    ENABLE_BRANDING=$(validate_boolean "$ENABLE_BRANDING" "false")
+    SHOW_COMPANY_NAME_IN_TITLE=$(validate_boolean "$SHOW_COMPANY_NAME_IN_TITLE" "true")
+    SHOW_SUPPORT_IN_MESSAGE=$(validate_boolean "$SHOW_SUPPORT_IN_MESSAGE" "true")
+    USE_COMPANY_LOGO=$(validate_boolean "$USE_COMPANY_LOGO" "true")
+
+    # --- String Length Validations (Issue #35) ---
+    echo "[CONFIG] Validating string lengths..." >&2
+    local MAX_STRING_LENGTH=1024
+    local MAX_PATH_LENGTH=256
+
+    # Validate dialog titles
+    if ! validate_string_length "$DIALOG_TITLE" "$MAX_STRING_LENGTH" "DIALOG_TITLE"; then
+        DIALOG_TITLE="macOS Upgrade Required"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$DIALOG_MESSAGE" "$MAX_STRING_LENGTH" "DIALOG_MESSAGE"; then
+        DIALOG_MESSAGE="Please install macOS ${INSTALLER_OS}. Select an action:"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$PREINSTALL_TITLE" "$MAX_STRING_LENGTH" "PREINSTALL_TITLE"; then
+        PREINSTALL_TITLE="macOS Upgrade Starting"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$PREINSTALL_MESSAGE" "$MAX_STRING_LENGTH" "PREINSTALL_MESSAGE"; then
+        PREINSTALL_MESSAGE="Your scheduled macOS upgrade is ready to begin."
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$SCHEDULED_TITLE" "$MAX_STRING_LENGTH" "SCHEDULED_TITLE"; then
+        SCHEDULED_TITLE="macOS Upgrade Scheduled"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$SCHEDULED_MESSAGE" "$MAX_STRING_LENGTH" "SCHEDULED_MESSAGE"; then
+        SCHEDULED_MESSAGE="Your scheduled macOS upgrade is ready to begin."
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$AUTH_NOTICE_TITLE" "$MAX_STRING_LENGTH" "AUTH_NOTICE_TITLE"; then
+        AUTH_NOTICE_TITLE="Admin Access Required"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$AUTH_NOTICE_MESSAGE" "$MAX_STRING_LENGTH" "AUTH_NOTICE_MESSAGE"; then
+        AUTH_NOTICE_MESSAGE="You will be prompted for admin credentials."
+        ((validation_errors++))
+    fi
+
+    # Validate button texts (shorter limit)
+    local MAX_BUTTON_LENGTH=100
+    if ! validate_string_length "$DIALOG_INSTALL_NOW_TEXT" "$MAX_BUTTON_LENGTH" "DIALOG_INSTALL_NOW_TEXT"; then
+        DIALOG_INSTALL_NOW_TEXT="Install Now"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$DIALOG_SCHEDULE_TODAY_TEXT" "$MAX_BUTTON_LENGTH" "DIALOG_SCHEDULE_TODAY_TEXT"; then
+        DIALOG_SCHEDULE_TODAY_TEXT="Schedule Today"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$DIALOG_DEFER_TEXT" "$MAX_BUTTON_LENGTH" "DIALOG_DEFER_TEXT"; then
+        DIALOG_DEFER_TEXT="Defer 24 Hours"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$ABORT_BUTTON_TEXT" "$MAX_BUTTON_LENGTH" "ABORT_BUTTON_TEXT"; then
+        ABORT_BUTTON_TEXT="Abort (Emergency)"
+        ((validation_errors++))
+    fi
+
+    # Validate company/branding strings
+    if ! validate_string_length "$COMPANY_NAME" "$MAX_STRING_LENGTH" "COMPANY_NAME"; then
+        COMPANY_NAME="Your Company Name"
+        ((validation_errors++))
+    fi
+
+    if ! validate_string_length "$SUPPORT_CONTACT" "$MAX_STRING_LENGTH" "SUPPORT_CONTACT"; then
+        SUPPORT_CONTACT="IT Support"
+        ((validation_errors++))
+    fi
+
+    # --- Dialog Position Validation (Issue #35) ---
+    DIALOG_POSITION=$(validate_dialog_position "$DIALOG_POSITION" "topright")
+
+    # --- Sanitize user-facing strings to prevent injection (Issue #35) ---
+    echo "[CONFIG] Sanitizing user-facing strings..." >&2
+    DIALOG_TITLE=$(sanitize_string "$DIALOG_TITLE")
+    DIALOG_MESSAGE=$(sanitize_string "$DIALOG_MESSAGE")
+    PREINSTALL_TITLE=$(sanitize_string "$PREINSTALL_TITLE")
+    PREINSTALL_MESSAGE=$(sanitize_string "$PREINSTALL_MESSAGE")
+    SCHEDULED_TITLE=$(sanitize_string "$SCHEDULED_TITLE")
+    SCHEDULED_MESSAGE=$(sanitize_string "$SCHEDULED_MESSAGE")
+    ERROR_DIALOG_TITLE=$(sanitize_string "$ERROR_DIALOG_TITLE")
+    ERROR_DIALOG_MESSAGE=$(sanitize_string "$ERROR_DIALOG_MESSAGE")
+    AUTH_NOTICE_TITLE=$(sanitize_string "$AUTH_NOTICE_TITLE")
+    AUTH_NOTICE_MESSAGE=$(sanitize_string "$AUTH_NOTICE_MESSAGE")
+    COMPANY_NAME=$(sanitize_string "$COMPANY_NAME")
+    SUPPORT_CONTACT=$(sanitize_string "$SUPPORT_CONTACT")
+
+    # --- Report validation results (Issue #35) ---
+    if [[ $validation_errors -gt 0 ]]; then
+        echo "[CONFIG] WARNING: $validation_errors validation error(s) detected - defaults applied" >&2
+    else
+        echo "[CONFIG] All validation checks passed" >&2
     fi
 
     # Log configuration summary
