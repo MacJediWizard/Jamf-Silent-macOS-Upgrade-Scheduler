@@ -3106,19 +3106,31 @@ EOF
     # Existing plist - check for version updates and missing keys
     local ver; ver=$(defaults read "${PLIST}" scriptVersion 2>/dev/null || echo "")
     if [[ "${ver}" != "${SCRIPT_VERSION}" ]]; then
-      log_info "New script version detected (${ver} -> ${SCRIPT_VERSION}); resetting counters"
+      # Extract major versions for comparison
+      local stored_major="${ver%%.*}"    # Gets "2" from "2.1.1"
+      local current_major="${SCRIPT_VERSION%%.*}"  # Gets "2" from "2.2.0"
+
+      if [[ -z "$stored_major" || "$stored_major" != "$current_major" ]]; then
+        # Major version change or new installation - reset counters
+        log_info "Major version change (${stored_major:-none} -> $current_major); resetting counters"
+        defaults write "${PLIST}" deferCount -int 0
+        defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
+        defaults write "${PLIST}" abortCount -int 0
+
+        # Update OS version info
+        local current_os=$(sw_vers -productVersion)
+        defaults write "${PLIST}" initialOSVersion -string "${current_os}"
+
+        local available_version
+        available_version=$(get_available_macos_version)
+        defaults write "${PLIST}" targetOSVersion -string "${available_version}"
+      else
+        # Minor/patch version update - preserve counters
+        log_info "Patch/minor version update ($ver -> $SCRIPT_VERSION); preserving counters"
+      fi
+
+      # Always update the stored script version
       defaults write "${PLIST}" scriptVersion -string "${SCRIPT_VERSION}"
-      defaults write "${PLIST}" deferCount -int 0
-      defaults write "${PLIST}" firstPromptDate -string "$(date -u +%s)"
-      defaults write "${PLIST}" abortCount -int 0
-      
-      # Update OS version info
-      local current_os=$(sw_vers -productVersion)
-      defaults write "${PLIST}" initialOSVersion -string "${current_os}"
-      
-      local available_version
-      available_version=$(get_available_macos_version)
-      defaults write "${PLIST}" targetOSVersion -string "${available_version}"
     fi
   fi
   
