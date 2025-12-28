@@ -17,6 +17,7 @@ error_handler() {
     echo "[CRITICAL ERROR] Please check logs at: ${WRAPPER_LOG:-/var/log/erase-install-wrapper.log}" >&2
 
     # Cleanup on error if possible
+    # ISSUE #34: || true intentional - cleanup must not prevent exit code propagation
     if declare -f cleanup_on_error >/dev/null 2>&1; then
         cleanup_on_error || true
     fi
@@ -679,6 +680,7 @@ kill_process_safely() {
     for pid in $pids; do
         if ps -p "$pid" >/dev/null 2>&1; then
             log_info "Sending SIGTERM to PID $pid for graceful shutdown"
+            # ISSUE #34: || true intentional - process may have already exited
             kill -TERM "$pid" 2>/dev/null || true
         fi
     done
@@ -701,6 +703,7 @@ kill_process_safely() {
         log_warn "Processes did not terminate gracefully, sending SIGKILL to: $pids"
         for pid in $pids; do
             if ps -p "$pid" >/dev/null 2>&1; then
+                # ISSUE #34: || true intentional - process may have exited between check and kill
                 kill -KILL "$pid" 2>/dev/null || true
             fi
         done
@@ -1202,7 +1205,17 @@ fi
 
 init_logging() {
   # Create log directory if it doesn't exist
-  [[ -d "${LOG_DIR}" ]] || mkdir -p "${LOG_DIR}"
+  # ISSUE #34: Critical directory creation with proper error handling
+  if [[ ! -d "${LOG_DIR}" ]]; then
+    if ! mkdir -p "${LOG_DIR}" 2>/dev/null; then
+      # Try alternative location if main log dir fails
+      LOG_DIR="/tmp/erase-install-logs"
+      mkdir -p "${LOG_DIR}" 2>/dev/null || {
+        echo "[ERROR] Failed to create log directory at ${LOG_DIR}" >&2
+        # Continue anyway - logging will fail but script may work
+      }
+    fi
+  fi
   
   # Log rotation logic
   if [[ -f "${WRAPPER_LOG}" ]]; then
@@ -1451,8 +1464,15 @@ EOFSCRIPT
     log_debug "Executing temp script as user $console_user"
     
     # Method 1: Direct sudo execution (most reliable)
+    # ISSUE #34: Track background process for proper error handling
     sudo -u "$console_user" bash "$temp_script" > "$exec_log" 2>&1 &
     local script_pid=$!
+
+    # Verify the background process started successfully
+    if ! ps -p "$script_pid" >/dev/null 2>&1; then
+      log_error "Failed to start background dialog script process"
+      return 1
+    fi
     
     log_debug "Started script process with PID: $script_pid"
     
@@ -1549,7 +1569,10 @@ acquire_lock() {
   local lock_fd=200  # Use file descriptor 200 for locking
 
   # Create lock directory if it doesn't exist
-  mkdir -p "$(dirname "$lock_path")" 2>/dev/null
+  # ISSUE #34: Non-critical - lock file creation will fail if dir doesn't exist
+  if ! mkdir -p "$(dirname "$lock_path")" 2>/dev/null; then
+    log_warn "Could not create lock directory: $(dirname "$lock_path")"
+  fi
 
   log_debug "Attempting to acquire lock: $lock_path (timeout: ${lock_timeout}s, force_break: ${force_break})"
 
@@ -1792,8 +1815,12 @@ install_erase_install() {
     log_info "All package download attempts failed. Downloading script directly..."
     
     # Create required directories
-    mkdir -p "/Library/Management/erase-install"
-    
+    # ISSUE #34: Critical directory for dependency installation
+    if ! mkdir -p "/Library/Management/erase-install"; then
+      log_error "Failed to create directory /Library/Management/erase-install"
+      return 1
+    fi
+
     # Create the script file directly
     local script_path="/Library/Management/erase-install/erase-install.sh"
     
@@ -1998,7 +2025,12 @@ install_swiftDialog() {
         log_info "App bundle download successful. Extracting..."
         
         # Create the application directory
-        mkdir -p "/Library/Application Support/Dialog"
+        # ISSUE #34: Critical directory for SwiftDialog installation
+        if ! mkdir -p "/Library/Application Support/Dialog"; then
+          log_error "Failed to create directory /Library/Application Support/Dialog"
+          rm -rf "${tmp}"
+          return 1
+        fi
         
         # Extract the ZIP file
         if /usr/bin/unzip -o "${zip_path}" -d "/Library/Application Support/Dialog/"; then
@@ -2010,8 +2042,12 @@ install_swiftDialog() {
             log_info "Found Dialog binary at: ${app_path}"
             chmod +x "${app_path}"
             
-            mkdir -p /usr/local/bin
-            ln -sf "${app_path}" "/usr/local/bin/dialog"
+            # ISSUE #34: Non-critical symlink creation - dialog will still work from app path
+            if mkdir -p /usr/local/bin 2>/dev/null; then
+              ln -sf "${app_path}" "/usr/local/bin/dialog" || log_warn "Could not create symlink to /usr/local/bin/dialog"
+            else
+              log_warn "Could not create /usr/local/bin directory for symlink"
+            fi
             DIALOG_BIN="/usr/local/bin/dialog"
             
             log_info "Created symlink to /usr/local/bin/dialog"
@@ -2084,10 +2120,14 @@ install_swiftDialog() {
   done
   
   # Create symlink for convenience if needed
+  # ISSUE #34: Non-critical convenience symlink
   if [[ "${found}" = "true" && "${DIALOG_BIN}" != "/usr/local/bin/dialog" ]]; then
     log_info "Creating symlink to /usr/local/bin/dialog"
-    mkdir -p /usr/local/bin
-    ln -sf "${DIALOG_BIN}" "/usr/local/bin/dialog"
+    if mkdir -p /usr/local/bin 2>/dev/null; then
+      ln -sf "${DIALOG_BIN}" "/usr/local/bin/dialog" || log_warn "Could not create convenience symlink"
+    else
+      log_warn "Could not create /usr/local/bin directory for convenience symlink"
+    fi
   fi
   
   # Final verification with version check
@@ -3588,15 +3628,23 @@ create_scheduled_launchdaemon() {
   sudo -u "$console_user" rm -f "$agent_path"
   
   # Create directory if it doesn't exist
-  sudo -u "$console_user" mkdir -p "/Users/$console_user/Library/LaunchAgents"
-  
+  # ISSUE #34: Critical directory for LaunchAgent
+  if ! sudo -u "$console_user" mkdir -p "/Users/$console_user/Library/LaunchAgents" 2>/dev/null; then
+    log_error "Failed to create LaunchAgents directory for user $console_user"
+    return 1
+  fi
+
   # For test mode, add indication in the dialog title
   local display_title="$SCHEDULED_TITLE"
   [[ "$TEST_MODE" = true ]] && display_title="${SCHEDULED_TITLE_TEST_MODE}"
-  
+
   # Create a helper script that will run dialog and then trigger the installer
   local helper_script="/Users/$console_user/Library/Application Support/erase-install-helper-${run_id}.sh"
-  mkdir -p "/Users/$console_user/Library/Application Support"
+  # ISSUE #34: Critical directory for helper script
+  if ! mkdir -p "/Users/$console_user/Library/Application Support" 2>/dev/null; then
+    log_error "Failed to create Application Support directory for helper script"
+    return 1
+  fi
   
   # Determine if abort button should be shown
   local abort_button_code=""
@@ -3747,6 +3795,7 @@ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Displaying abort confirmation dialog" >> "
 
 # Signal success to the user
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Sending user notification" >> "\$LOG_FILE"
+# ISSUE #34: || true intentional - notification is non-critical UX enhancement
 osascript -e "display notification \"Installation aborted and will be rescheduled\" with title \"macOS Upgrade\"" 2>/dev/null || true
 
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ ABORT PROCESSING COMPLETE - Exiting helper script" >> "\$LOG_FILE"
@@ -3820,7 +3869,10 @@ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Created UI completion file" >> "\$LOG_FILE
 rm -f "\$DIALOG_OUTPUT_FILE" 2>/dev/null
 
 # Delete self with delay to ensure complete execution
-(sleep 5 && rm -f "$0" && echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Helper script self-cleaned" >> "\$LOG_FILE") &
+# ISSUE #34: Background cleanup process - non-critical, logging any failures
+(sleep 5 && rm -f "\$0" && echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Helper script self-cleaned" >> "\$LOG_FILE") &
+CLEANUP_PID=\$!
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Started cleanup process with PID: \$CLEANUP_PID" >> "\$LOG_FILE"
 
 exit 0
 EOF
@@ -3882,8 +3934,12 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
   
   # 2. Create a watchdog script that will monitor for the trigger file
   local watchdog_script="/Library/Management/erase-install/erase-install-watchdog-${run_id}.sh"
-  mkdir -p "/Library/Management/erase-install"
-  
+  # ISSUE #34: Critical directory for watchdog script
+  if ! mkdir -p "/Library/Management/erase-install" 2>/dev/null; then
+    log_error "Failed to create directory for watchdog script"
+    return 1
+  fi
+
   # Verify WRAPPER_PATH before creating watchdog script
   if [ ! -f "${WRAPPER_PATH}" ]; then
     log_warn "WRAPPER_PATH (${WRAPPER_PATH}) does not exist. Using fallback path."
@@ -3960,27 +4016,36 @@ $([ -n "${month_num}" ] && printf "        <key>Month</key>\n        <integer>%d
     fi
     
     # Try to load the daemon
+    # ISSUE #34: Critical daemon operation - try multiple methods with proper logging
     while [ $attempt -le $max_attempts ]; do
       log_info "Loading attempt $attempt/$max_attempts..."
-      
-      # Try multiple loading methods
-      sudo launchctl load "$daemon_path" 2>/dev/null || 
-      sudo launchctl bootstrap system "$daemon_path" 2>/dev/null ||
-      sudo launchctl kickstart system/"$daemon_label" 2>/dev/null
-      
+
+      # Try multiple loading methods with proper error capture
+      local load_error=""
+      if sudo launchctl load "$daemon_path" 2>&1; then
+        log_info "Daemon loaded via launchctl load"
+      elif sudo launchctl bootstrap system "$daemon_path" 2>&1; then
+        log_info "Daemon loaded via launchctl bootstrap"
+      elif sudo launchctl kickstart system/"$daemon_label" 2>&1; then
+        log_info "Daemon loaded via launchctl kickstart"
+      else
+        load_error="All load methods failed"
+        log_warn "Load attempt $attempt: $load_error"
+      fi
+
       # Verify if it was loaded successfully
       sleep 1
       if sudo launchctl list | grep -q "$daemon_label"; then
-        log_info "✅ Successfully loaded and verified LaunchDaemon: $daemon_label"
+        log_info "Successfully loaded and verified LaunchDaemon: $daemon_label"
         return 0
       fi
-      
-      log_warn "Load attempt $attempt failed, retrying..."
+
+      log_warn "Load attempt $attempt verification failed, retrying..."
       sleep 2
       attempt=$((attempt+1))
     done
-    
-    log_error "⚠️ Failed to load LaunchDaemon after $max_attempts attempts"
+
+    log_error "Failed to load LaunchDaemon after $max_attempts attempts"
     return 1
   }
   
@@ -4071,12 +4136,15 @@ local level="${2:-INFO}"
 local log_entry="[$level] [$(date '+%Y-%m-%d %H:%M:%S')] $message"
 
 # Ensure log file directory exists
+# ISSUE #34: || true intentional - logging must not cause script failure
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 # Write to log file with error handling
+# ISSUE #34: || true intentional - continue operation even if logging fails
 echo "$log_entry" >> "$LOG_FILE" 2>/dev/null || true
 
 # Also log to system.log for easier debugging with error handling
+# ISSUE #34: || true intentional - system logging is non-critical
 if [ -n "$message" ]; then
 logger -t "erase-install-watchdog-${RUN_ID}" "$message" 2>/dev/null || true
 else
@@ -4336,6 +4404,7 @@ fi
 log_message "CLEANUP PHASE 1: Removing key components" | tee -a "${cleanup_log}"
 
 # Get the UID of the console user - with error handling
+# ISSUE #34: || true intentional - cleanup should continue even if UID detection fails
 local console_uid=""
 if [ -n "$CONSOLE_USER" ]; then
 console_uid=$(id -u "$CONSOLE_USER" 2>/dev/null) || true
@@ -4349,6 +4418,7 @@ log_message "WARNING: No console user specified, cleanup may be incomplete" | te
 fi
 
 # CRITICAL: Stop any running erase-install processes first
+# ISSUE #34: || true intentional for process termination - process may have already exited
 if pgrep -f "erase-install.sh" >/dev/null; then
 log_message "Stopping running erase-install processes" | tee -a "${cleanup_log}"
 pkill -TERM -f "erase-install.sh" 2>/dev/null || true
@@ -4359,9 +4429,10 @@ kill_process_safely "erase-install.sh" 5 || true
 fi
 
 # Unload LaunchAgent if it exists and we have a console user
+# ISSUE #34: || true intentional for cleanup operations - multiple methods tried, each may fail
 if [ -n "$AGENT_PATH" ] && [ -f "$AGENT_PATH" ] && [ -n "$console_uid" ]; then
 log_message "Unloading UI LaunchAgent: $AGENT_LABEL" | tee -a "${cleanup_log}"
-# Try multiple methods with proper error handling
+# Try multiple methods with proper error handling - each method is a fallback for others
 launchctl asuser "$console_uid" sudo -u "$CONSOLE_USER" launchctl remove "$AGENT_LABEL" 2>>"${cleanup_log}" || true
 launchctl asuser "$console_uid" sudo -u "$CONSOLE_USER" launchctl unload "$AGENT_PATH" 2>>"${cleanup_log}" || true
 launchctl asuser "$console_uid" launchctl bootout gui/$console_uid/"$AGENT_LABEL" 2>>"${cleanup_log}" || true
@@ -4378,6 +4449,7 @@ log_message "LaunchAgent path not found or not specified, skipping" | tee -a "${
 fi
 
 # Remove helper script if it exists
+# ISSUE #34: || true intentional - non-critical cleanup file removal
 if [ -n "$HELPER_SCRIPT" ] && [ -f "$HELPER_SCRIPT" ]; then
 log_message "Removing helper script: $HELPER_SCRIPT" | tee -a "${cleanup_log}"
 rm -f "$HELPER_SCRIPT" 2>>"${cleanup_log}" || true
@@ -4387,10 +4459,11 @@ fi
 log_message "CLEANUP PHASE 2: Checking for startosinstall daemon" | tee -a "${cleanup_log}"
 
 # Handle startosinstall daemon (MOST CRITICAL PART)
+# ISSUE #34: || true intentional - multiple daemon removal methods tried as fallbacks
 local startosinstall_plist="/Library/LaunchDaemons/com.github.grahampugh.erase-install.startosinstall.plist"
 if [ -f "$startosinstall_plist" ]; then
 log_message "CRITICAL: Found startosinstall daemon - removing immediately" | tee -a "${cleanup_log}"
-# Try multiple methods with proper error handling
+# Try multiple methods with proper error handling - each is a fallback for others
 launchctl remove "com.github.grahampugh.erase-install.startosinstall" 2>>"${cleanup_log}" || true
 launchctl bootout system/"com.github.grahampugh.erase-install.startosinstall" 2>>"${cleanup_log}" || true
 launchctl unload "$startosinstall_plist" 2>>"${cleanup_log}" || true
@@ -4413,6 +4486,7 @@ log_message "No startosinstall daemon found - good" | tee -a "${cleanup_log}"
 fi
 
 # CLEANUP PHASE 3: Remove our own daemon if specified
+# ISSUE #34: || true intentional - multiple daemon removal methods tried as fallbacks
 if [ -n "$DAEMON_LABEL" ] && [ -n "$DAEMON_PATH" ]; then
 log_message "CLEANUP PHASE 3: Unloading our LaunchDaemon: $DAEMON_LABEL" | tee -a "${cleanup_log}"
 launchctl remove "$DAEMON_LABEL" 2>>"${cleanup_log}" || true
@@ -4466,6 +4540,7 @@ log_message "CLEANUP PHASE 4: Starting background cleanup process" | tee -a "${c
   watchdog_script="$WATCHDOG_SCRIPT"
   
   # Remove any temporary files
+  # ISSUE #34: || true intentional - temp file cleanup should not block script completion
   echo "$(date '+%Y-%m-%d %H:%M:%S') Removing temporary files" >> "${cleanup_log}"
   rm -f /var/tmp/dialog.* 2>/dev/null || true
   rm -f /var/tmp/erase-install-ui-* 2>/dev/null || true
@@ -4489,19 +4564,21 @@ log_message "CLEANUP PHASE 4: Starting background cleanup process" | tee -a "${c
         echo "$(date '+%Y-%m-%d %H:%M:%S') Skipping invalid daemon label: $daemon_label" >> "${cleanup_log}"
         continue
       fi
+      # ISSUE #34: || true intentional - lingering daemon cleanup is best-effort
       sudo launchctl remove "$daemon_label" 2>/dev/null || true
       sudo rm -f "$daemon_path" 2>/dev/null || true
     fi
   done
   
   # Clean up any watchdog scripts in the Management directory
+  # ISSUE #34: || true intentional - script cleanup should not block completion
   for script in /Library/Management/erase-install/erase-install-watchdog-*.sh; do
     if [ -e "$script" ] && [ "$script" != "$watchdog_script" ]; then
       echo "$(date '+%Y-%m-%d %H:%M:%S') Removing lingering watchdog script: $script" >> "${cleanup_log}"
       rm -f "$script" 2>/dev/null || true
     fi
   done
-  
+
   # Remove self (watchdog script) at the very end, but only if not running from abort daemon
   if [ -n "$watchdog_script" ] && [ -f "$watchdog_script" ] && [ "$preserve_abort" != "true" ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') Cleaning up watchdog script: $watchdog_script" >> "${cleanup_log}"
@@ -4512,13 +4589,19 @@ log_message "CLEANUP PHASE 4: Starting background cleanup process" | tee -a "${c
   fi
   
   # Remove mutex to signal completion
+  # ISSUE #34: || true intentional - mutex cleanup should not fail the script
   rm -rf "${cleanup_mutex}" 2>/dev/null || true
   
   echo "$(date '+%Y-%m-%d %H:%M:%S') Background cleanup process completed successfully" >> "${cleanup_log}"
 ) &
 
+# ISSUE #34: Track background cleanup process PID for debugging
+local cleanup_bg_pid=$!
+log_message "Started background cleanup process with PID: ${cleanup_bg_pid}"
+
 # Make sure not to wait for the background process
-disown $! 2>/dev/null || true
+# ISSUE #34: disown is non-critical - if it fails, process still runs but may show in job list
+disown ${cleanup_bg_pid} 2>/dev/null || log_warn "Could not disown cleanup process ${cleanup_bg_pid}"
 
 log_message "Cleanup process initiated successfully, background process will continue"
 
@@ -5001,8 +5084,14 @@ chmod 644 "$RELAUNCH_DAEMON_PATH"
 chown root:wheel "$RELAUNCH_DAEMON_PATH"
 
 # Load the LaunchDaemon
+# ISSUE #34: Critical daemon operation - check return code and log errors
 log_info "Loading relaunch LaunchDaemon"
-launchctl load "$RELAUNCH_DAEMON_PATH"
+if ! launchctl load "$RELAUNCH_DAEMON_PATH" 2>/dev/null; then
+  log_warn "Failed to load relaunch LaunchDaemon with load command, trying bootstrap"
+  if ! launchctl bootstrap system "$RELAUNCH_DAEMON_PATH" 2>/dev/null; then
+    log_error "Failed to load relaunch LaunchDaemon - will attempt direct execution"
+  fi
+fi
 
 # Wait for it to start
 log_info "Waiting 5 seconds for main script to start"
@@ -5015,12 +5104,23 @@ else
 log_warn "Main script may not have started properly, trying direct execution"
 
 # Fallback: Try direct execution if LaunchDaemon didn't work
+# ISSUE #34: Track background process PID for verification
 if [ $EUID -eq 0 ]; then
 log_info "Executing main script directly as root"
 "${WRAPPER_PATH}" > /var/log/erase-install-wrapper-relaunch-${RUN_ID}.log 2>&1 &
+RELAUNCH_PID=\$!
+log_info "Started relaunch process with PID: \$RELAUNCH_PID"
 else
 log_info "Executing main script directly as user"
 sudo -u "$CONSOLE_USER" "${WRAPPER_PATH}" > /var/tmp/erase-install-wrapper-relaunch.log 2>&1 &
+RELAUNCH_PID=\$!
+log_info "Started relaunch process with PID: \$RELAUNCH_PID"
+fi
+
+# Verify the process started
+if ! ps -p "\$RELAUNCH_PID" >/dev/null 2>&1; then
+  log_error "Failed to start relaunch process"
+fi
 fi
 fi
 
@@ -5182,14 +5282,23 @@ log_message "✅ VALIDATED: defer_day=$defer_day, defer_month=$defer_month"
     abort_daemon_path="/Library/LaunchDaemons/${abort_daemon_label}.plist"
     
     log_message "Loading abort daemon: $abort_daemon_label"
-    
-    # Load daemon with verification
-    if sudo launchctl load "$abort_daemon_path" 2>/dev/null; then
-      log_message "✅ Standard load succeeded"
+
+    # ISSUE #34: Critical daemon operation - load with proper error handling and logging
+    local abort_load_success=false
+    if sudo launchctl load "$abort_daemon_path" 2>&1 | log_message; then
+      log_message "Standard load succeeded"
+      abort_load_success=true
     else
-      log_message "⚠️ Standard load failed, trying alternatives"
-      sudo launchctl bootstrap system "$abort_daemon_path" 2>/dev/null || 
-      sudo launchctl kickstart system/"$abort_daemon_label" 2>/dev/null
+      log_message "Standard load failed, trying alternatives"
+      if sudo launchctl bootstrap system "$abort_daemon_path" 2>&1 | log_message; then
+        log_message "Bootstrap load succeeded"
+        abort_load_success=true
+      elif sudo launchctl kickstart system/"$abort_daemon_label" 2>&1 | log_message; then
+        log_message "Kickstart succeeded"
+        abort_load_success=true
+      else
+        log_message "ERROR: All daemon load methods failed"
+      fi
     fi
     
     # Verify daemon is loaded
@@ -5230,6 +5339,7 @@ log_message "✅ VALIDATED: defer_day=$defer_day, defer_month=$defer_month"
         log_message "❌ Failed to verify saved abort daemon (expected: $abort_daemon_label, got: $saved_daemon)"
       fi
       
+      # ISSUE #34: || true intentional - notification is non-critical UX enhancement
       osascript -e "display notification \"Installation rescheduled for $defer_hour:$defer_min\" with title \"macOS Upgrade Aborted\"" 2>/dev/null || true
     else
       log_message "❌ CRITICAL: Abort daemon not found in launchctl"
@@ -6265,8 +6375,11 @@ show_preinstall() {
   done
   
   # Kill dialog if still running
+  # ISSUE #34: Process may have already exited, log but don't fail
   if ! $dialog_closed && ps -p $dialog_pid >/dev/null 2>&1; then
-    kill $dialog_pid 2>/dev/null
+    if ! kill $dialog_pid 2>/dev/null; then
+      log_debug "Dialog process already terminated or could not be killed"
+    fi
   fi
   
   # Cleanup temp file
@@ -6310,6 +6423,7 @@ show_preinstall() {
       --width "${ABORT_WIDTH}"
       
       # Signal success to the user
+      # ISSUE #34: || true intentional - notification is non-critical UX enhancement
       osascript -e "display notification \"Installation aborted and will be rescheduled\" with title \"macOS Upgrade\"" 2>/dev/null || true
       
       # Clean up
@@ -7273,9 +7387,16 @@ export DISPLAY=:0
 export PATH='/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 
 # Force activation of UI layer first
+# ISSUE #34: Non-critical background UI activation - failures are logged but don't block
 /usr/bin/osascript -e 'tell application "Finder" to activate' &
+FINDER_PID=\$!
 /usr/bin/osascript -e 'tell application "System Events" to activate' &
+SYSEVENTS_PID=\$!
+# Brief wait for UI activation (non-blocking for failures)
 sleep 1
+# Log if activation failed (non-critical, dialog may still work)
+ps -p \$FINDER_PID >/dev/null 2>&1 || echo "Note: Finder activation completed or not needed"
+ps -p \$SYSEVENTS_PID >/dev/null 2>&1 || echo "Note: System Events activation completed or not needed"
 
 # Store dialog path and confirm it exists
 DIALOG_PATH="${DIALOG_BIN}"
