@@ -25,6 +25,117 @@ error_handler() {
     exit "${error_code}"
 }
 
+# Array to track background processes started by this script
+# ISSUE #39: Track background PIDs for cleanup on signal
+BACKGROUND_PIDS=()
+
+# Signal handler for INT (Ctrl+C), TERM, and HUP signals
+# ISSUE #39: Comprehensive signal handling for proper cleanup
+cleanup_on_interrupt() {
+    local signal="${1:-UNKNOWN}"
+
+    # Use echo since log_* functions may not be defined yet at script start
+    echo "[WARN]    [$(date +'%Y-%m-%d %H:%M:%S')] Received signal: $signal - performing cleanup before exit" >&2
+
+    # Try to use log_warn if available
+    if declare -f log_warn >/dev/null 2>&1; then
+        log_warn "Received signal: $signal - performing cleanup before exit"
+    fi
+
+    # Kill all background jobs started by this script
+    local jobs_list
+    jobs_list=$(jobs -p 2>/dev/null || true)
+
+    if [[ -n "$jobs_list" ]]; then
+        echo "[INFO]    [$(date +'%Y-%m-%d %H:%M:%S')] Terminating background processes from jobs..." >&2
+        if declare -f log_info >/dev/null 2>&1; then
+            log_info "Terminating background processes from jobs..."
+        fi
+
+        while read -r pid; do
+            if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done <<< "$jobs_list"
+
+        # Wait briefly for graceful termination
+        sleep 2
+
+        # Force kill any remaining
+        while read -r pid; do
+            if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+                echo "[WARN]    [$(date +'%Y-%m-%d %H:%M:%S')] Force killing process: $pid" >&2
+                if declare -f log_warn >/dev/null 2>&1; then
+                    log_warn "Force killing process: $pid"
+                fi
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done <<< "$jobs_list"
+    fi
+
+    # Also kill any tracked background PIDs
+    if [[ ${#BACKGROUND_PIDS[@]} -gt 0 ]]; then
+        echo "[INFO]    [$(date +'%Y-%m-%d %H:%M:%S')] Terminating tracked background processes..." >&2
+        if declare -f log_info >/dev/null 2>&1; then
+            log_info "Terminating tracked background processes..."
+        fi
+
+        for pid in "${BACKGROUND_PIDS[@]}"; do
+            if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done
+
+        sleep 1
+
+        # Force kill remaining tracked processes
+        for pid in "${BACKGROUND_PIDS[@]}"; do
+            if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+                echo "[WARN]    [$(date +'%Y-%m-%d %H:%M:%S')] Force killing tracked process: $pid" >&2
+                if declare -f log_warn >/dev/null 2>&1; then
+                    log_warn "Force killing tracked process: $pid"
+                fi
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    # Kill lingering watchdog processes if the function exists
+    if declare -f kill_lingering_watchdogs >/dev/null 2>&1; then
+        kill_lingering_watchdogs || true
+    fi
+
+    # Release lock if function exists
+    if declare -f release_lock >/dev/null 2>&1; then
+        release_lock || true
+    fi
+
+    # Call cleanup_and_exit if it exists (defined later in script for scheduled runs)
+    if declare -f cleanup_and_exit >/dev/null 2>&1; then
+        # Pass appropriate exit code based on signal
+        case "$signal" in
+            INT)  cleanup_and_exit 130 ;;  # 128 + 2 (SIGINT)
+            TERM) cleanup_and_exit 143 ;;  # 128 + 15 (SIGTERM)
+            HUP)  cleanup_and_exit 129 ;;  # 128 + 1 (SIGHUP)
+            *)    cleanup_and_exit 1 ;;
+        esac
+    else
+        # Exit with appropriate code if cleanup_and_exit not defined
+        case "$signal" in
+            INT)  exit 130 ;;
+            TERM) exit 143 ;;
+            HUP)  exit 129 ;;
+            *)    exit 1 ;;
+        esac
+    fi
+}
+
+# Set up signal traps for INT (Ctrl+C), TERM, and HUP
+# ISSUE #39: Handle interrupts gracefully with proper cleanup
+trap 'cleanup_on_interrupt INT' INT
+trap 'cleanup_on_interrupt TERM' TERM
+trap 'cleanup_on_interrupt HUP' HUP
+
 # Set error trap
 trap 'error_handler ${LINENO} ${BASH_LINENO} "$BASH_COMMAND" $?' ERR
 
@@ -7825,7 +7936,11 @@ if [[ "$1" == "--scheduled" ]]; then
   fi
   
   # Set up trap immediately
-  trap 'cleanup_and_exit' EXIT TERM INT
+  # ISSUE #39: Use cleanup_on_interrupt for INT/TERM/HUP, keep cleanup_and_exit for EXIT
+  trap 'cleanup_and_exit' EXIT
+  trap 'cleanup_on_interrupt INT' INT
+  trap 'cleanup_on_interrupt TERM' TERM
+  trap 'cleanup_on_interrupt HUP' HUP
   
   # Set up locking
   if [[ $EUID -eq 0 ]]; then
@@ -7853,9 +7968,11 @@ if [[ "$1" == "--scheduled" ]]; then
   fi
   
   # Set up trap to release lock on exit
-  trap 'release_lock; cleanup_and_exit' EXIT TERM INT  
-  
-  # Ensure cleanup on exit - trap is already set up above
+  # ISSUE #39: Use cleanup_on_interrupt for INT/TERM/HUP, release_lock+cleanup_and_exit for EXIT
+  trap 'release_lock; cleanup_and_exit' EXIT
+  trap 'cleanup_on_interrupt INT' INT
+  trap 'cleanup_on_interrupt TERM' TERM
+  trap 'cleanup_on_interrupt HUP' HUP
   
   log_system_info
   
@@ -8327,7 +8444,11 @@ if ! acquire_lock "$LOCK_FILE" 15 false; then
 fi
 
 # Set up trap to release lock on exit
-trap 'release_lock' EXIT TERM INT
+# ISSUE #39: Use cleanup_on_interrupt for INT/TERM/HUP, release_lock for EXIT
+trap 'release_lock' EXIT
+trap 'cleanup_on_interrupt INT' INT
+trap 'cleanup_on_interrupt TERM' TERM
+trap 'cleanup_on_interrupt HUP' HUP
 
 # Check for dependencies
 if ! dependency_check; then
